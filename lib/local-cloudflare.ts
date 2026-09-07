@@ -1,0 +1,119 @@
+import { DatabaseSync } from 'node:sqlite';
+
+// Minimal D1-compatible adapter for the local Node fallback. Production still
+// uses the real Cloudflare D1 binding through cloudflare:workers.
+const database = new DatabaseSync(':memory:');
+
+database.exec(`
+  CREATE TABLE model_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    delta REAL NOT NULL,
+    reason TEXT NOT NULL,
+    sample_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_model_adjustments_week_kind
+    ON model_adjustments (season, week, kind);
+  CREATE INDEX idx_model_adjustments_season_kind
+    ON model_adjustments (season, kind);
+  CREATE TABLE prediction_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    home_team TEXT NOT NULL,
+    predicted_winner TEXT NOT NULL,
+    home_probability REAL NOT NULL,
+    favorite_probability REAL NOT NULL,
+    live_delta REAL DEFAULT 0 NOT NULL,
+    captured_at TEXT NOT NULL,
+    settled_at TEXT,
+    away_score INTEGER,
+    home_score INTEGER,
+    winner TEXT,
+    correct INTEGER,
+    market_home_probability REAL
+  );
+  CREATE UNIQUE INDEX uq_prediction_snapshots_game
+    ON prediction_snapshots (season, game_key);
+  CREATE INDEX idx_prediction_snapshots_season_week
+    ON prediction_snapshots (season, week);
+  CREATE INDEX idx_prediction_snapshots_unsettled
+    ON prediction_snapshots (season, settled_at);
+  CREATE TABLE weekly_learning_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    graded_games INTEGER NOT NULL,
+    correct_picks INTEGER NOT NULL,
+    brier_score REAL NOT NULL,
+    home_residual REAL NOT NULL,
+    favorite_residual REAL NOT NULL,
+    insight TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_weekly_learning_runs
+    ON weekly_learning_runs (season, week);
+  CREATE TABLE market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    away_moneyline INTEGER,
+    home_moneyline INTEGER,
+    away_spread REAL,
+    home_spread REAL,
+    total_line REAL,
+    away_spread_odds INTEGER,
+    home_spread_odds INTEGER,
+    over_odds INTEGER,
+    under_odds INTEGER
+  );
+  CREATE UNIQUE INDEX uq_market_snapshots_source_game_time
+    ON market_snapshots (source, game_key, observed_at);
+  CREATE INDEX idx_market_snapshots_season_week
+    ON market_snapshots (season, week);
+  CREATE INDEX idx_market_snapshots_game_time
+    ON market_snapshots (game_key, observed_at);
+`);
+
+class LocalStatement {
+  constructor(
+    private readonly sql: string,
+    private readonly values: unknown[] = [],
+  ) {}
+
+  bind(...values: unknown[]) {
+    return new LocalStatement(this.sql, values);
+  }
+
+  all<T>() {
+    return { results: database.prepare(this.sql).all(...this.values) as T[] };
+  }
+
+  first<T>() {
+    return database.prepare(this.sql).get(...this.values) as T | undefined;
+  }
+
+  run() {
+    return database.prepare(this.sql).run(...this.values);
+  }
+}
+
+class LocalD1 {
+  prepare(sql: string) {
+    return new LocalStatement(sql);
+  }
+
+  batch(statements: LocalStatement[]) {
+    return statements.map((statement) => statement.run());
+  }
+}
+
+export const env = { DB: new LocalD1() };
