@@ -91,6 +91,61 @@ export const forecastLedger = sqliteTable(
   ],
 );
 
+// Immutable, paired V2-versus-V5 exam records. These intentionally live
+// outside the canonical prediction and learning ledgers: one row preserves the
+// two model outputs produced from one server-computed market observation.
+export const prospectiveModelSnapshots = sqliteTable(
+  'prospective_model_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    season: integer('season').notNull(),
+    week: integer('week').notNull(),
+    gameKey: text('game_key').notNull(),
+    awayTeam: text('away_team').notNull(),
+    homeTeam: text('home_team').notNull(),
+    scheduledKickoffAt: text('scheduled_kickoff_at'),
+    captureBucket: text('capture_bucket').notNull(),
+    capturedAt: text('captured_at').notNull(),
+    marketObservedAt: text('market_observed_at'),
+    marketSource: text('market_source'),
+    marketHomeProbability: real('market_home_probability'),
+    v2HomeProbability: real('v2_home_probability').notNull(),
+    v2PredictedWinner: text('v2_predicted_winner').notNull(),
+    v2ModelVersion: text('v2_model_version').notNull(),
+    v5HomeProbability: real('v5_home_probability'),
+    v5PredictedWinner: text('v5_predicted_winner'),
+    v5RawResidualLogit: real('v5_raw_residual_logit'),
+    v5AppliedShadowScale: real('v5_applied_shadow_scale'),
+    v5ModelVersion: text('v5_model_version'),
+    v5FeatureDataThroughWeek: integer('v5_feature_data_through_week'),
+    v5FeaturePayloadJson: text('v5_feature_payload_json'),
+    v5Available: integer('v5_available', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    productionInfluence: real('production_influence').notNull().default(0),
+    settledAt: text('settled_at'),
+    awayScore: integer('away_score'),
+    homeScore: integer('home_score'),
+    winner: text('winner'),
+    v2Correct: integer('v2_correct', { mode: 'boolean' }),
+    v5Correct: integer('v5_correct', { mode: 'boolean' }),
+  },
+  (table) => [
+    uniqueIndex('uq_prospective_model_game_bucket').on(
+      table.season,
+      table.gameKey,
+      table.captureBucket,
+    ),
+    index('idx_prospective_model_season_week').on(table.season, table.week),
+    index('idx_prospective_model_game_time').on(
+      table.season,
+      table.gameKey,
+      table.capturedAt,
+    ),
+    index('idx_prospective_model_unsettled').on(table.season, table.settledAt),
+  ],
+);
+
 // Timestamped research evidence only. Unstructured reports are deliberately
 // ineligible for production forecasts until a specialist proves incremental
 // value in chronological, timestamp-matched evaluation.

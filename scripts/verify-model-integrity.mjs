@@ -5,11 +5,13 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-const [schema, learning, modelV2, historicalSource] = await Promise.all([
+const [schema, learning, modelV2, historicalSource, prospective, prospectiveRoute] = await Promise.all([
   readFile(resolve('db/schema.ts'), 'utf8'),
   readFile(resolve('lib/learning.ts'), 'utf8'),
   readFile(resolve('lib/model-v2.ts'), 'utf8'),
   readFile(resolve('lib/historical-backtest-data.ts'), 'utf8'),
+  readFile(resolve('lib/prospective-model-exam.ts'), 'utf8'),
+  readFile(resolve('app/api/prospective-exam/route.ts'), 'utf8'),
 ]);
 
 assert(
@@ -20,6 +22,12 @@ assert(
 assert(
   schema.includes('uq_prediction_snapshots_game'),
   'Canonical one-pick-per-game uniqueness must remain intact.',
+);
+assert(
+  schema.includes("'prospective_model_snapshots'") &&
+    schema.includes('uq_prospective_model_game_bucket') &&
+    schema.includes('idx_prospective_model_unsettled'),
+  'The paired V2/V5 prospective-exam schema or indexes are missing.',
 );
 assert(
   learning.includes('INSERT OR IGNORE INTO forecast_ledger'),
@@ -39,6 +47,22 @@ assert(
     modelV2.includes('push: number') &&
     !modelV2.includes('(expectedHomeMargin + homeSpread - 0.5)'),
   'Spread math must preserve explicit push probability rather than the old binary shortcut.',
+);
+assert(
+  modelV2.includes('footballCorrectionWeight: 0'),
+  'V2 football correction weight must remain zero.',
+);
+assert(
+  prospective.includes('production_influence) VALUES') &&
+    prospective.includes("PROSPECTIVE_SHADOW_LABEL") &&
+    prospective.includes('settleProspectiveRows'),
+  'The prospective exam must remain a paired, separately settled shadow ledger.',
+);
+assert(
+  prospectiveRoute.includes('fetchMarketLines()') &&
+    prospectiveRoute.includes('calculateV5Shadow') &&
+    !prospectiveRoute.includes('request.json'),
+  'Prospective capture must be server-computed rather than browser-submitted.',
 );
 
 const start = historicalSource.indexOf('HISTORICAL_BACKTEST = ');
