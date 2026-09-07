@@ -82,6 +82,46 @@ database.exec(`
     ON forecast_ledger (season, game_key, captured_at);
   CREATE INDEX idx_forecast_ledger_season_week
     ON forecast_ledger (season, week);
+  CREATE TABLE prospective_model_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    home_team TEXT NOT NULL,
+    scheduled_kickoff_at TEXT,
+    capture_bucket TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    market_observed_at TEXT,
+    market_source TEXT,
+    market_home_probability REAL,
+    v2_home_probability REAL NOT NULL,
+    v2_predicted_winner TEXT NOT NULL,
+    v2_model_version TEXT NOT NULL,
+    v5_home_probability REAL,
+    v5_predicted_winner TEXT,
+    v5_raw_residual_logit REAL,
+    v5_applied_shadow_scale REAL,
+    v5_model_version TEXT,
+    v5_feature_data_through_week INTEGER,
+    v5_feature_payload_json TEXT,
+    v5_available INTEGER DEFAULT 0 NOT NULL,
+    production_influence REAL DEFAULT 0 NOT NULL,
+    settled_at TEXT,
+    away_score INTEGER,
+    home_score INTEGER,
+    winner TEXT,
+    v2_correct INTEGER,
+    v5_correct INTEGER
+  );
+  CREATE UNIQUE INDEX uq_prospective_model_game_bucket
+    ON prospective_model_snapshots (season, game_key, capture_bucket);
+  CREATE INDEX idx_prospective_model_season_week
+    ON prospective_model_snapshots (season, week);
+  CREATE INDEX idx_prospective_model_game_time
+    ON prospective_model_snapshots (season, game_key, captured_at);
+  CREATE INDEX idx_prospective_model_unsettled
+    ON prospective_model_snapshots (season, settled_at);
   CREATE TABLE game_postmortems (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     snapshot_id INTEGER NOT NULL,

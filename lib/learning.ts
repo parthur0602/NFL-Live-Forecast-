@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { DEFAULT_LEARNED_MODEL, type LearnedModelState } from '@/lib/forecast';
+import { settleProspectiveRows } from '@/lib/prospective-model-exam';
 
 const SEASON = 2026;
 const MAX_HOME_FIELD_ADJUSTMENT = 0.5;
@@ -359,7 +360,13 @@ async function settleWeek(week: number) {
       .bind(SEASON, week)
       .all<Snapshot>()
   ).results;
-  if (!snapshots.length) return;
+  const prospective = await database
+    .prepare(
+      `SELECT COUNT(*) AS count FROM prospective_model_snapshots WHERE season = ? AND week = ? AND winner IS NULL`,
+    )
+    .bind(SEASON, week)
+    .first<{ count: number }>();
+  if (!snapshots.length && !(prospective?.count ?? 0)) return;
   const results = await resultsForWeek(week);
   const byMatchup = new Map(
     results.map((result) => [`${result.away}__${result.home}`, result]),
@@ -459,6 +466,9 @@ async function settleWeek(week: number) {
     return statements;
   });
   if (updates.length) await database.batch(updates);
+  // Paired V2/V5 exam rows settle beside, but never feed into, canonical
+  // prediction snapshots, weekly learning, or error/success memory.
+  if (prospective?.count) await settleProspectiveRows(database, SEASON, week, results, settledAt);
 }
 
 function insightFor(
@@ -636,9 +646,13 @@ export async function syncAndLearn() {
   const pendingWeeks = (
     await database
       .prepare(
-        `SELECT DISTINCT week FROM prediction_snapshots WHERE season = ? AND winner IS NULL ORDER BY week`,
+        `SELECT DISTINCT week FROM (
+          SELECT week FROM prediction_snapshots WHERE season = ? AND winner IS NULL
+          UNION
+          SELECT week FROM prospective_model_snapshots WHERE season = ? AND winner IS NULL
+        ) ORDER BY week`,
       )
-      .bind(SEASON)
+      .bind(SEASON, SEASON)
       .all<{ week: number }>()
   ).results;
   for (const { week } of pendingWeeks) {
