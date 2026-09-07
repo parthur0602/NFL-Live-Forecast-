@@ -4,7 +4,7 @@
 // present; football remains the transparent fallback and audit layer.
 
 export const MODEL_V2 = {
-  version: 'V2.0-MARKET-ANCHOR-SHADOW',
+  version: 'V2.1-MARKET-ANCHOR-INTEGRITY',
   footballCorrectionWeight: 0,
   marginResidualStdDev: 13.14,
   decisionRule:
@@ -60,21 +60,73 @@ function normalCdf(value: number) {
   return 0.5 * (1 + sign * erf);
 }
 
+function normalIntegerMass(
+  integerMargin: number,
+  expectedMargin: number,
+  standardDeviation: number,
+) {
+  const upper = (integerMargin + 0.5 - expectedMargin) / standardDeviation;
+  const lower = (integerMargin - 0.5 - expectedMargin) / standardDeviation;
+  return Math.max(0, normalCdf(upper) - normalCdf(lower));
+}
+
+export type SpreadProbabilities = {
+  homeCover: number;
+  push: number;
+  awayCover: number;
+};
+
+/**
+ * A conservative discrete-margin baseline.
+ *
+ * V2 still assumes a normal latent margin because no timestamp-matched
+ * empirical margin model has earned promotion yet, but it projects that latent
+ * distribution onto integer NFL final margins. This makes integer-spread push
+ * probability explicit and prevents the old binary half-point shortcut from
+ * pretending pushes do not exist.
+ */
+export function spreadProbabilities(
+  expectedHomeMargin: number,
+  homeSpread: number | null,
+): SpreadProbabilities | null {
+  if (homeSpread === null) return null;
+
+  let homeCover = 0;
+  let push = 0;
+  let awayCover = 0;
+  const settlementThreshold = -homeSpread;
+
+  for (let margin = -80; margin <= 80; margin += 1) {
+    const mass = normalIntegerMass(
+      margin,
+      expectedHomeMargin,
+      MODEL_V2.marginResidualStdDev,
+    );
+    if (margin > settlementThreshold) homeCover += mass;
+    else if (margin < settlementThreshold) awayCover += mass;
+    else push += mass;
+  }
+
+  // Capture negligible tails outside the explicit integer grid, then normalize
+  // so the public probabilities always sum to one.
+  const total = homeCover + push + awayCover;
+  if (total <= 0) return null;
+  return {
+    homeCover: homeCover / total,
+    push: push / total,
+    awayCover: awayCover / total,
+  };
+}
+
 export function homeCoverProbability(
   expectedHomeMargin: number,
   homeSpread: number | null,
 ) {
-  if (homeSpread === null) return null;
-  // Half a point keeps the discrete push mass out of a binary cover estimate.
-  return Math.max(
-    0.01,
-    Math.min(
-      0.99,
-      normalCdf(
-        (expectedHomeMargin + homeSpread - 0.5) / MODEL_V2.marginResidualStdDev,
-      ),
-    ),
-  );
+  const probabilities = spreadProbabilities(expectedHomeMargin, homeSpread);
+  if (!probabilities) return null;
+  // Keep the existing call-site contract: this is unconditional P(home cover),
+  // not a re-normalized two-way probability with pushes discarded.
+  return Math.max(0.001, Math.min(0.999, probabilities.homeCover));
 }
 
 export function americanFairOdds(probability: number) {
