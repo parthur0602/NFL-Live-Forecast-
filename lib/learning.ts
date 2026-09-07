@@ -684,7 +684,7 @@ export async function capturePredictions(items: CaptureItem[]) {
   const candidates = items.slice(0, 18);
   const completed = new Set<string>();
   const started = new Set<string>();
-  for (const week of [...new Set(candidates.map((item) => item.week))]) {
+  for (const week of new Set(candidates.map((item) => item.week))) {
     for (const result of await resultsForWeek(week))
       completed.add(`${result.away}__${result.home}`);
     for (const gameKey of await startedGameKeysForWeek(week))

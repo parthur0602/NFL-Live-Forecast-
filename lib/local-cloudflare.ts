@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 
 // Minimal D1-compatible adapter for the local Node fallback. Production still
 // uses the real Cloudflare D1 binding through cloudflare:workers.
@@ -50,6 +50,38 @@ database.exec(`
     ON prediction_snapshots (season, week);
   CREATE INDEX idx_prediction_snapshots_unsettled
     ON prediction_snapshots (season, settled_at);
+  CREATE TABLE forecast_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    home_team TEXT NOT NULL,
+    predicted_winner TEXT NOT NULL,
+    home_probability REAL NOT NULL,
+    market_home_probability REAL,
+    football_home_probability REAL,
+    expected_home_margin REAL,
+    market_expected_home_margin REAL,
+    home_spread REAL,
+    home_cover_probability REAL,
+    model_version TEXT,
+    favorite_probability REAL NOT NULL,
+    live_delta REAL DEFAULT 0 NOT NULL,
+    capture_bucket TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    settled_at TEXT,
+    away_score INTEGER,
+    home_score INTEGER,
+    winner TEXT,
+    correct INTEGER
+  );
+  CREATE UNIQUE INDEX uq_forecast_ledger_game_bucket
+    ON forecast_ledger (season, game_key, capture_bucket);
+  CREATE INDEX idx_forecast_ledger_game_time
+    ON forecast_ledger (season, game_key, captured_at);
+  CREATE INDEX idx_forecast_ledger_season_week
+    ON forecast_ledger (season, week);
   CREATE TABLE game_postmortems (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     snapshot_id INTEGER NOT NULL,
@@ -146,10 +178,10 @@ database.exec(`
 class LocalStatement {
   constructor(
     private readonly sql: string,
-    private readonly values: unknown[] = [],
+    private readonly values: SQLInputValue[] = [],
   ) {}
 
-  bind(...values: unknown[]) {
+  bind(...values: SQLInputValue[]) {
     return new LocalStatement(this.sql, values);
   }
 
