@@ -15,6 +15,13 @@
       "when": 1788758488003,
       "tag": "0001_closed_magik",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788809203412,
+      "tag": "0002_lazy_ares",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,12 @@ type ClientPick = {
   predictedWinner?: unknown;
   homeProbability?: unknown;
   marketHomeProbability?: unknown;
+  footballHomeProbability?: unknown;
+  expectedHomeMargin?: unknown;
+  marketExpectedHomeMargin?: unknown;
+  homeSpread?: unknown;
+  homeCoverProbability?: unknown;
+  modelVersion?: unknown;
   favoriteProbability?: unknown;
   liveDelta?: unknown;
 };
@@ -16,6 +22,10 @@ type ClientPick = {
 function validPick(value: ClientPick) {
   const number = (input: unknown) =>
     typeof input === 'number' && Number.isFinite(input);
+  const nullableNumber = (input: unknown, min: number, max: number) =>
+    input === null ||
+    input === undefined ||
+    (number(input) && (input as number) >= min && (input as number) <= max);
   return (
     Number.isInteger(value.week) &&
     (value.week as number) >= 1 &&
@@ -28,11 +38,15 @@ function validPick(value: ClientPick) {
     number(value.homeProbability) &&
     (value.homeProbability as number) >= 0.01 &&
     (value.homeProbability as number) <= 0.99 &&
-    (value.marketHomeProbability === null ||
-      value.marketHomeProbability === undefined ||
-      (number(value.marketHomeProbability) &&
-        (value.marketHomeProbability as number) >= 0.01 &&
-        (value.marketHomeProbability as number) <= 0.99)) &&
+    nullableNumber(value.marketHomeProbability, 0.01, 0.99) &&
+    nullableNumber(value.footballHomeProbability, 0.01, 0.99) &&
+    nullableNumber(value.expectedHomeMargin, -60, 60) &&
+    nullableNumber(value.marketExpectedHomeMargin, -60, 60) &&
+    nullableNumber(value.homeSpread, -40, 40) &&
+    nullableNumber(value.homeCoverProbability, 0.01, 0.99) &&
+    (value.modelVersion === null ||
+      value.modelVersion === undefined ||
+      (typeof value.modelVersion === 'string' && value.modelVersion.length <= 96)) &&
     number(value.favoriteProbability) &&
     (value.favoriteProbability as number) >= 0.5 &&
     (value.favoriteProbability as number) <= 0.99 &&
@@ -63,6 +77,12 @@ export async function POST(request: Request) {
         predictedWinner: string;
         homeProbability: number;
         marketHomeProbability: number | null;
+        footballHomeProbability: number | null;
+        expectedHomeMargin: number | null;
+        marketExpectedHomeMargin: number | null;
+        homeSpread: number | null;
+        homeCoverProbability: number | null;
+        modelVersion: string | null;
         favoriteProbability: number;
         liveDelta: number;
       }>,

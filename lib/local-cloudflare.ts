@@ -36,7 +36,13 @@ database.exec(`
     home_score INTEGER,
     winner TEXT,
     correct INTEGER,
-    market_home_probability REAL
+    market_home_probability REAL,
+    football_home_probability REAL,
+    expected_home_margin REAL,
+    market_expected_home_margin REAL,
+    home_spread REAL,
+    home_cover_probability REAL,
+    model_version TEXT
   );
   CREATE UNIQUE INDEX uq_prediction_snapshots_game
     ON prediction_snapshots (season, game_key);
@@ -44,6 +50,60 @@ database.exec(`
     ON prediction_snapshots (season, week);
   CREATE INDEX idx_prediction_snapshots_unsettled
     ON prediction_snapshots (season, settled_at);
+  CREATE TABLE game_postmortems (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    snapshot_id INTEGER NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    predicted_winner TEXT NOT NULL,
+    actual_winner TEXT NOT NULL,
+    home_probability REAL NOT NULL,
+    market_home_probability REAL,
+    expected_home_margin REAL,
+    actual_home_margin REAL NOT NULL,
+    correct INTEGER NOT NULL,
+    error_severity REAL NOT NULL,
+    probability_surprise REAL NOT NULL,
+    taxonomy_json TEXT NOT NULL,
+    pregame_features_json TEXT NOT NULL,
+    data_quality TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_game_postmortems_snapshot ON game_postmortems (snapshot_id);
+  CREATE INDEX idx_game_postmortems_season_week ON game_postmortems (season, week);
+  CREATE INDEX idx_game_postmortems_severity ON game_postmortems (error_severity);
+  CREATE TABLE error_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    snapshot_id INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    severity REAL NOT NULL,
+    pregame_features_json TEXT NOT NULL,
+    lesson TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_error_memory_snapshot ON error_memory (snapshot_id);
+  CREATE INDEX idx_error_memory_severity ON error_memory (severity);
+  CREATE TABLE success_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    snapshot_id INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    pregame_features_json TEXT NOT NULL,
+    lesson TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_success_memory_snapshot ON success_memory (snapshot_id);
+  CREATE INDEX idx_success_memory_game ON success_memory (game_key);
+  CREATE TABLE specialist_registry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    code TEXT NOT NULL,
+    status TEXT NOT NULL,
+    production_weight REAL DEFAULT 0 NOT NULL,
+    evidence TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_specialist_registry_code ON specialist_registry (code);
   CREATE TABLE weekly_learning_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,

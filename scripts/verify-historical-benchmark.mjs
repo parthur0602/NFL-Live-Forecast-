@@ -26,6 +26,15 @@ const required = [
 if (required.some((value) => value === null || value === undefined))
   throw new Error('Current model benchmark did not complete.');
 
+if (data.v4?.modelVersion === 'V4.0-ERROR-MEMORY-SHADOW') {
+  if (data.v4.replay?.predictionLocks !== data.v4.metrics?.games)
+    throw new Error('V4 prequential replay did not lock every graded game.');
+  if ((data.v4.experts ?? []).some((expert) => expert.productionWeight !== 0))
+    throw new Error('A V4 shadow specialist received production weight.');
+  if (data.v4.replay?.championChanged)
+    throw new Error('The V4 shadow replay cannot replace the production champion.');
+}
+
 // V1 is permanent reference history. It is intentionally not overwritten by
 // future challenger experiments or by the current-model display.
 if (

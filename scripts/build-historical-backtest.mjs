@@ -194,6 +194,7 @@ function closingMarketFor(game) {
     awaySpreadOdds: Number.isFinite(Number(game.awaySpreadOdds))
       ? Number(game.awaySpreadOdds)
       : null,
+    totalLine: Number.isFinite(Number(game.totalLine)) ? Number(game.totalLine) : null,
   };
 }
 
@@ -597,6 +598,258 @@ function errorDiagnostics(records) {
     .slice(0, 10);
 }
 
+function pregameFlags(record) {
+  const market = record.closingMarket;
+  const expectedMargin = market.expectedHomeMargin ?? 0;
+  const marketHome = market.homeProbability ?? 0.5;
+  const wind = Number(record.wind);
+  const restGap = Number(record.homeRest) - Number(record.awayRest);
+  return {
+    homeFavorite: marketHome >= 0.5,
+    roadFavorite: marketHome < 0.5,
+    smallSpread: Math.abs(expectedMargin) <= 3.5,
+    keyNumber: [2.5, 3, 3.5, 6.5, 7, 7.5].some(
+      (number) => Math.abs(Math.abs(expectedMargin) - number) < 0.1,
+    ),
+    largeFavorite: Math.abs(expectedMargin) >= 7,
+    divisionGame: Boolean(record.divisionGame),
+    shortRest: Number(record.homeRest) <= 6 || Number(record.awayRest) <= 6,
+    restAdvantage: Math.abs(restGap) >= 3,
+    highWind: Number.isFinite(wind) && wind >= 15,
+    dome: record.roof === 'dome' || record.roof === 'closed',
+    footballMarketDisagreement:
+      market.homeProbability !== null &&
+      Math.abs(record.homeProbability - market.homeProbability) >= 0.08,
+  };
+}
+
+function featureNames(flags) {
+  return Object.entries(flags)
+    .filter(([, value]) => value)
+    .map(([name]) => name);
+}
+
+function gameScript(record, expected = false) {
+  const margin = expected
+    ? record.closingMarket.expectedHomeMargin ?? record.expectedHomeMargin
+    : record.actualHomeMargin;
+  const total = expected
+    ? record.closingMarket.totalLine
+    : record.homeScore + record.awayScore;
+  const favoriteWins = expected
+    ? true
+    : (margin >= 0) === ((record.closingMarket.homeProbability ?? 0.5) >= 0.5);
+  const tags = [];
+  tags.push(Math.abs(margin) <= 7 ? 'Close game' : 'Separation game');
+  tags.push(favoriteWins ? 'Favorite game script' : 'Underdog game script');
+  if (total !== null && total !== undefined)
+    tags.push(total >= 50 ? 'High scoring' : total <= 37 ? 'Low scoring' : 'Mid-range scoring');
+  return tags;
+}
+
+function scriptSimilarity(predicted, actual) {
+  const overlap = predicted.filter((item) => actual.includes(item)).length;
+  return overlap / new Set([...predicted, ...actual]).size;
+}
+
+function sameFeatureCount(left, right) {
+  return left.filter((item) => right.includes(item)).length;
+}
+
+function buildV4MemoryReplay(records) {
+  const chronological = marketRecords(records);
+  const errors = [];
+  const successes = [];
+  const postmortems = [];
+  const curve = [];
+  const categoryCounts = new Map();
+  let cumulativeBrier = 0;
+
+  for (const record of chronological) {
+    const flags = pregameFlags(record);
+    const features = featureNames(flags);
+    const priorSimilarErrors = errors.filter(
+      (memory) => sameFeatureCount(memory.features, features) >= 2,
+    );
+    const priorSimilarSuccesses = successes.filter(
+      (memory) => sameFeatureCount(memory.features, features) >= 2,
+    );
+    const marketProbability = record.closingMarket.homeProbability;
+    const predictedWinner = marketProbability >= 0.5 ? record.home : record.away;
+    const actualHomeWin = record.winner === record.home ? 1 : 0;
+    const pickProbability = Math.max(marketProbability, 1 - marketProbability);
+    const correct = predictedWinner === record.winner;
+    const probabilitySurprise = -Math.log(
+      correct ? pickProbability : 1 - pickProbability,
+    );
+    const marginError = Math.abs(
+      (record.closingMarket.expectedHomeMargin ?? 0) - record.actualHomeMargin,
+    );
+    const severity = Math.min(
+      100,
+      100 *
+        (0.65 * probabilitySurprise / Math.log(100) +
+          0.35 * Math.min(1, marginError / 30)),
+    );
+    const predictedScript = gameScript(record, true);
+    const actualScript = gameScript(record, false);
+    const taxonomy = [];
+    if (!correct && pickProbability >= 0.7) taxonomy.push('CONFIDENCE_ERROR');
+    if (marginError >= 14) taxonomy.push('MARGIN_DISTRIBUTION_ERROR');
+    if (
+      record.closingMarket.homeProbability !== null &&
+      Math.abs(record.homeProbability - record.closingMarket.homeProbability) >= 0.08 &&
+      (record.homeProbability - actualHomeWin) ** 2 >
+        (record.closingMarket.homeProbability - actualHomeWin) ** 2
+    )
+      taxonomy.push('MARKET_CORRECTION_ERROR');
+    if (!correct && pickProbability < 0.6) taxonomy.push('UNPREDICTABLE_EVENT');
+    if (!taxonomy.length) taxonomy.push(correct ? 'CALIBRATED_OUTCOME' : 'UNKNOWN');
+    for (const tag of taxonomy)
+      categoryCounts.set(tag, (categoryCounts.get(tag) ?? 0) + 1);
+    const varianceProbability =
+      !correct && pickProbability < 0.6 ? 0.7 : !correct ? 0.35 : 0.15;
+    const postmortem = {
+      gameId: record.gameId,
+      season: record.season,
+      week: record.week,
+      away: record.away,
+      home: record.home,
+      predictionTimestamp: record.predictionTimestamp,
+      modelVersion: 'V4.0-ERROR-MEMORY-SHADOW',
+      predictedWinner,
+      actualWinner: record.winner,
+      marketHomeProbability: marketProbability,
+      predictedHomeProbability: marketProbability,
+      predictedHomeMargin: record.closingMarket.expectedHomeMargin,
+      actualHomeMargin: record.actualHomeMargin,
+      correct,
+      probabilitySurprise,
+      errorSeverity: severity,
+      taxonomy,
+      predictableErrorProbability: 1 - varianceProbability,
+      varianceEventProbability: varianceProbability,
+      dataQuality: 'Closing-market proxy only; no timestamped injury, OL, pressure, or QB-status archive.',
+      pregameFeatures: features,
+      predictedScript,
+      actualScript,
+      scriptSimilarity: scriptSimilarity(predictedScript, actualScript),
+      priorSimilarErrors: priorSimilarErrors.length,
+      priorSimilarSuccesses: priorSimilarSuccesses.length,
+      lesson:
+        priorSimilarErrors.length >= 48
+          ? 'Prior analogs are available for research review; no automatic probability correction is permitted.'
+          : 'Insufficient prior analogs for a model lesson.',
+    };
+    postmortems.push(postmortem);
+    const memoryItem = {
+      ...postmortem,
+      features,
+      marketProbability,
+      marginError,
+    };
+    if (!correct && severity >= 20) errors.push(memoryItem);
+    if (correct) successes.push(memoryItem);
+    cumulativeBrier += (marketProbability - actualHomeWin) ** 2;
+    if ([250, 500, 750, 1000, 1250].includes(postmortems.length))
+      curve.push({
+        games: postmortems.length,
+        v4Brier: cumulativeBrier / postmortems.length,
+        marketBrier: cumulativeBrier / postmortems.length,
+        note: 'Prequential shadow forecast equals the market baseline until a specialist earns activation.',
+      });
+  }
+
+  const candidateDefinitions = [
+    ['Short-rest specialist', 'shortRest', 'Timestamped rest is available'],
+    ['Weather specialist', 'highWind', 'Historical wind is available; future forecast timing still required'],
+    ['Division specialist', 'divisionGame', 'Division flag is available'],
+    ['Small-spread specialist', 'smallSpread', 'Closing spread proxy only'],
+    ['Key-number specialist', 'keyNumber', 'Closing spread proxy only'],
+    ['Market-disagreement specialist', 'footballMarketDisagreement', 'Football comparison uses a closing-market proxy'],
+    ['QB uncertainty specialist', null, 'Not evaluated: no timestamped QB-status archive'],
+    ['OL / pass-rush specialist', null, 'Not evaluated: no pregame OL injury and pressure archive'],
+  ];
+  const experts = candidateDefinitions.map(([name, flag, availability]) => {
+    const eligible = flag
+      ? postmortems.filter((postmortem) => postmortem.pregameFeatures.includes(flag))
+      : [];
+    const errorsInGroup = eligible.filter((postmortem) => !postmortem.correct && postmortem.errorSeverity >= 20);
+    const successesInGroup = eligible.filter((postmortem) => postmortem.correct);
+    return {
+      name,
+      availability,
+      games: eligible.length,
+      significantErrors: errorsInGroup.length,
+      comparableSuccesses: successesInGroup.length,
+      errorRate: eligible.length ? errorsInGroup.length / eligible.length : null,
+      status: 'RESEARCH',
+      productionWeight: 0,
+      decision:
+        'No same-timestamp market validation and no out-of-sample specialist improvement; specialist remains inactive.',
+    };
+  });
+  const clusters = experts
+    .filter((expert) => expert.games >= 24)
+    .sort((left, right) => (right.errorRate ?? 0) - (left.errorRate ?? 0))
+    .slice(0, 5)
+    .map((expert) => ({
+      label: expert.name,
+      games: expert.games,
+      significantErrors: expert.significantErrors,
+      comparableSuccesses: expert.comparableSuccesses,
+      errorRate: expert.errorRate,
+      status: 'Research only — compare errors with comparable successes before any hypothesis test.',
+    }));
+  const hypotheses = clusters.map((cluster) => ({
+    statement: `${cluster.label} may have a recurring error pattern; compare ${cluster.significantErrors} significant errors with ${cluster.comparableSuccesses} comparable successes before testing.`,
+    status: 'RESEARCH',
+    productionEligible: false,
+  }));
+
+  return {
+    modelVersion: 'V4.0-ERROR-MEMORY-SHADOW',
+    champion: 'V2 market-anchor remains production champion',
+    protocol:
+      'For each game: lock forecast, reveal outcome, create postmortem, add only that completed game to memory, then allow it to inform later games.',
+    metrics: marketSummary(records),
+    replay: {
+      gamesStudied: postmortems.length,
+      predictionLocks: postmortems.length,
+      individualPostmortems: postmortems.length,
+      errorMemory: errors.length,
+      successMemory: successes.length,
+      significantErrors: errors.length,
+      likelyVarianceOutcomes: postmortems.filter(
+        (postmortem) => postmortem.varianceEventProbability >= 0.7,
+      ).length,
+      recurringErrorClusters: clusters.length,
+      hypothesesGenerated: hypotheses.length,
+      hypothesesValidated: 0,
+      hypothesesRejected: 0,
+      specialistsPromoted: 0,
+      championChanged: false,
+    },
+    taxonomy: [...categoryCounts.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((left, right) => right.count - left.count),
+    experts,
+    clusters,
+    hypotheses,
+    learningCurve: curve,
+    postmortems: postmortems
+      .filter((postmortem) => !postmortem.correct)
+      .sort((left, right) => right.errorSeverity - left.errorSeverity)
+      .slice(0, 6),
+    guardrails: [
+      'A game is graded before it is added to error or success memory; only later games can retrieve that memory.',
+      'Specialists begin at 0% production weight and require same-timestamp, chronological out-of-sample evidence before activation.',
+      'OL, pressure, injury-timing, and QB-uncertainty experts remain unevaluated until timestamped pregame data exists.',
+      'The closing market is a diagnostic proxy only and cannot be used to claim same-time V4 edge or betting value.',
+    ],
+  };
+}
+
 function createHashFor(snapshot) {
   return createHash('sha256')
     .update(JSON.stringify(snapshot))
@@ -639,6 +892,15 @@ const games = rows
     spreadLine: row.spread_line,
     homeSpreadOdds: row.home_spread_odds,
     awaySpreadOdds: row.away_spread_odds,
+    totalLine: row.total_line,
+    homeRest: row.home_rest,
+    awayRest: row.away_rest,
+    divisionGame: row.div_game === '1',
+    roof: row.roof?.trim() || null,
+    wind: row.wind,
+    temp: row.temp,
+    homeQuarterback: row.home_qb_name || null,
+    awayQuarterback: row.away_qb_name || null,
   }))
   .sort(
     (left, right) =>
@@ -715,6 +977,14 @@ for (let start = 0; start < games.length;) {
         ...prediction,
         predictionHash,
         closingMarket: closingMarketFor(game),
+        homeRest: Number.isFinite(Number(game.homeRest)) ? Number(game.homeRest) : null,
+        awayRest: Number.isFinite(Number(game.awayRest)) ? Number(game.awayRest) : null,
+        divisionGame: game.divisionGame,
+        roof: game.roof,
+        wind: Number.isFinite(Number(game.wind)) ? Number(game.wind) : null,
+        temp: Number.isFinite(Number(game.temp)) ? Number(game.temp) : null,
+        homeQuarterback: game.homeQuarterback,
+        awayQuarterback: game.awayQuarterback,
         awayScore: game.awayScore,
         homeScore: game.homeScore,
         actualHomeMargin,
@@ -821,17 +1091,18 @@ const v2 = v2Replay(records);
 const spread = spreadDiagnostics(records);
 const marketDisagreement = disagreementDiagnostics(records);
 const errorSeverity = errorDiagnostics(records);
+const v4 = buildV4MemoryReplay(records);
 const currentBenchmark = {
-  modelVersion: v2.modelVersion,
-  label: 'Current V2 market-anchor benchmark',
-  status: 'Provisional closing-market proxy',
+  modelVersion: v4.modelVersion,
+  label: 'Current V4 error-memory shadow benchmark',
+  status: 'Shadow — V2 remains champion',
   evaluatedAt: new Date().toISOString(),
   scope: '2021–2025 regular season and postseason; decided games only',
-  metrics: v2.allFiveSeasons,
+  metrics: v4.metrics,
   releaseRule:
     'This benchmark is regenerated before every production build. A future model cannot replace it until its chronological historical replay completes.',
   nextEvidence:
-    'Same-timestamp market snapshots must accumulate prospectively before a V3 football residual or betting edge can be promoted.',
+    'Same-timestamp market snapshots and timestamped pregame injury/QB/OL inputs must accumulate prospectively before any V4 specialist can be promoted.',
   permanentReference: {
     modelVersion: MODEL_VERSION,
     accuracy: overall.accuracy,
@@ -905,6 +1176,7 @@ const output = `// Generated by scripts/build-historical-backtest.mjs. Do not ed
     spread,
     marketDisagreement,
     errorSeverity,
+    v4,
     currentBenchmark,
     records,
   },

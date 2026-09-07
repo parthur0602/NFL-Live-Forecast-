@@ -17,6 +17,12 @@ type Snapshot = {
   predicted_winner: string;
   home_probability: number;
   market_home_probability: number | null;
+  football_home_probability: number | null;
+  expected_home_margin: number | null;
+  market_expected_home_margin: number | null;
+  home_spread: number | null;
+  home_cover_probability: number | null;
+  model_version: string | null;
   favorite_probability: number;
   live_delta: number;
   captured_at: string;
@@ -69,6 +75,24 @@ export type LearningDashboard = {
   };
   runs: LearningRun[];
   outcomes: PickOutcome[];
+  memory: {
+    postmortems: number;
+    errors: number;
+    successes: number;
+    notable: Array<{
+      gameKey: string;
+      week: number;
+      correct: boolean;
+      errorSeverity: number;
+      taxonomy: string[];
+    }>;
+    specialists: Array<{
+      code: string;
+      status: string;
+      productionWeight: number;
+      evidence: string;
+    }>;
+  };
   pendingSnapshots: number;
   note: string;
 };
@@ -80,6 +104,121 @@ function db() {
 }
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+function safeJsonArray(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+function postmortemFor(snapshot: Snapshot, result: ScoreboardResult) {
+  const correct = snapshot.predicted_winner ===
+    (result.homeScore > result.awayScore ? result.home : result.away);
+  const actualHomeWin = result.homeScore > result.awayScore ? 1 : 0;
+  const probabilitySurprise = -Math.log(
+    correct ? snapshot.favorite_probability : 1 - snapshot.favorite_probability,
+  );
+  const actualHomeMargin = result.homeScore - result.awayScore;
+  const marginError = snapshot.expected_home_margin === null
+    ? 0
+    : Math.abs(snapshot.expected_home_margin - actualHomeMargin);
+  const errorSeverity = Math.min(
+    100,
+    100 *
+      (0.65 * probabilitySurprise / Math.log(100) +
+        0.35 * Math.min(1, marginError / 30)),
+  );
+  const taxonomy: string[] = [];
+  if (!correct && snapshot.favorite_probability >= 0.7)
+    taxonomy.push('CONFIDENCE_ERROR');
+  if (marginError >= 14) taxonomy.push('MARGIN_DISTRIBUTION_ERROR');
+  if (
+    snapshot.football_home_probability !== null &&
+    snapshot.market_home_probability !== null &&
+    Math.abs(snapshot.football_home_probability - snapshot.market_home_probability) >=
+      0.08 &&
+    Math.pow(snapshot.football_home_probability - actualHomeWin, 2) >
+      Math.pow(snapshot.market_home_probability - actualHomeWin, 2)
+  )
+    taxonomy.push('MARKET_CORRECTION_ERROR');
+  if (!correct && snapshot.favorite_probability < 0.6)
+    taxonomy.push('UNPREDICTABLE_EVENT');
+  if (!taxonomy.length) taxonomy.push(correct ? 'CALIBRATED_OUTCOME' : 'UNKNOWN');
+  const features = {
+    footballHomeProbability: snapshot.football_home_probability,
+    marketHomeProbability: snapshot.market_home_probability,
+    expectedHomeMargin: snapshot.expected_home_margin,
+    marketExpectedHomeMargin: snapshot.market_expected_home_margin,
+    homeSpread: snapshot.home_spread,
+    homeCoverProbability: snapshot.home_cover_probability,
+    liveDelta: snapshot.live_delta,
+  };
+  return {
+    correct,
+    actualHomeMargin,
+    probabilitySurprise,
+    errorSeverity,
+    taxonomy,
+    features,
+    dataQuality:
+      snapshot.market_home_probability === null
+        ? 'Football fallback; no paired market probability was captured.'
+        : 'Timestamped desk snapshot captured before kickoff.',
+  };
+}
+const SPECIALIST_STARTERS = [
+  {
+    code: 'market_baseline',
+    status: 'PRODUCTION',
+    productionWeight: 1,
+    evidence: 'V2 market-anchor remains the production champion until a specialist proves a forward, timestamp-matched improvement.',
+  },
+  {
+    code: 'qb_uncertainty',
+    status: 'DATA_REQUIRED',
+    productionWeight: 0,
+    evidence: 'Requires timestamped starting-QB status and uncertainty labels.',
+  },
+  {
+    code: 'ol_pass_rush',
+    status: 'DATA_REQUIRED',
+    productionWeight: 0,
+    evidence: 'Requires timestamped offensive-line availability and pass-rush pressure inputs.',
+  },
+  {
+    code: 'weather',
+    status: 'RESEARCH',
+    productionWeight: 0,
+    evidence: 'Requires pre-kickoff weather snapshots and chronological out-of-sample validation.',
+  },
+  {
+    code: 'key_number',
+    status: 'RESEARCH',
+    productionWeight: 0,
+    evidence: 'Requires timestamp-matched spread snapshots and forward spread performance.',
+  },
+] as const;
+async function ensureSpecialistRegistry(database: D1Database) {
+  const now = new Date().toISOString();
+  await database.batch(
+    SPECIALIST_STARTERS.map((expert) =>
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO specialist_registry (code, status, production_weight, evidence, updated_at) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          expert.code,
+          expert.status,
+          expert.productionWeight,
+          expert.evidence,
+          now,
+        ),
+    ),
+  );
 }
 type ScheduleTeam = {
   displayName?: string;
@@ -186,7 +325,7 @@ async function settleWeek(week: number) {
   const snapshots = (
     await database
       .prepare(
-        `SELECT id, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, favorite_probability, live_delta, captured_at, winner, correct, away_score, home_score FROM prediction_snapshots WHERE season = ? AND week = ?`,
+        `SELECT id, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, football_home_probability, expected_home_margin, market_expected_home_margin, home_spread, home_cover_probability, model_version, favorite_probability, live_delta, captured_at, winner, correct, away_score, home_score FROM prediction_snapshots WHERE season = ? AND week = ?`,
       )
       .bind(SEASON, week)
       .all<Snapshot>()
@@ -201,9 +340,11 @@ async function settleWeek(week: number) {
     if (snapshot.winner) return [];
     const result = byMatchup.get(snapshot.game_key);
     if (!result || result.awayScore === result.homeScore) return [];
-    const winner =
-      result.homeScore > result.awayScore ? result.home : result.away;
-    return [
+    const analysis = postmortemFor(snapshot, result);
+    const winner = result.homeScore > result.awayScore ? result.home : result.away;
+    const featureJson = JSON.stringify(analysis.features);
+    const taxonomyJson = JSON.stringify(analysis.taxonomy);
+    const statements = [
       database
         .prepare(
           `UPDATE prediction_snapshots SET settled_at = ?, away_score = ?, home_score = ?, winner = ?, correct = ? WHERE id = ?`,
@@ -213,10 +354,66 @@ async function settleWeek(week: number) {
           result.awayScore,
           result.homeScore,
           winner,
-          snapshot.predicted_winner === winner ? 1 : 0,
+          analysis.correct ? 1 : 0,
           snapshot.id,
         ),
     ];
+    statements.push(
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO game_postmortems (snapshot_id, season, week, game_key, model_version, predicted_winner, actual_winner, home_probability, market_home_probability, expected_home_margin, actual_home_margin, correct, error_severity, probability_surprise, taxonomy_json, pregame_features_json, data_quality, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          snapshot.id,
+          SEASON,
+          snapshot.week,
+          snapshot.game_key,
+          snapshot.model_version ?? 'V4.0-ERROR-MEMORY-SHADOW',
+          snapshot.predicted_winner,
+          winner,
+          snapshot.home_probability,
+          snapshot.market_home_probability,
+          snapshot.expected_home_margin,
+          analysis.actualHomeMargin,
+          analysis.correct ? 1 : 0,
+          analysis.errorSeverity,
+          analysis.probabilitySurprise,
+          taxonomyJson,
+          featureJson,
+          analysis.dataQuality,
+          settledAt,
+        ),
+    );
+    if (!analysis.correct && analysis.errorSeverity >= 20)
+      statements.push(
+        database
+          .prepare(
+            `INSERT OR IGNORE INTO error_memory (snapshot_id, game_key, severity, pregame_features_json, lesson, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            snapshot.id,
+            snapshot.game_key,
+            analysis.errorSeverity,
+            featureJson,
+            'Saved for later analog review only. One miss cannot activate a specialist.',
+            settledAt,
+          ),
+      );
+    if (analysis.correct)
+      statements.push(
+        database
+          .prepare(
+            `INSERT OR IGNORE INTO success_memory (snapshot_id, game_key, pregame_features_json, lesson, created_at) VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            snapshot.id,
+            snapshot.game_key,
+            featureJson,
+            'Saved as a comparable success so error patterns must be tested against normal outcomes.',
+            settledAt,
+          ),
+      );
+    return statements;
   });
   if (updates.length) await database.batch(updates);
 }
@@ -390,6 +587,7 @@ async function learnCompletedWeek(week: number) {
 
 export async function syncAndLearn() {
   const database = db();
+  await ensureSpecialistRegistry(database);
   const pendingWeeks = (
     await database
       .prepare(
@@ -435,6 +633,12 @@ export async function capturePredictions(
     predictedWinner: string;
     homeProbability: number;
     marketHomeProbability: number | null;
+    footballHomeProbability: number | null;
+    expectedHomeMargin: number | null;
+    marketExpectedHomeMargin: number | null;
+    homeSpread: number | null;
+    homeCoverProbability: number | null;
+    modelVersion: string | null;
     favoriteProbability: number;
     liveDelta: number;
   }>,
@@ -457,7 +661,7 @@ export async function capturePredictions(
     .map((item) =>
       database
         .prepare(
-          `INSERT OR IGNORE INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, favorite_probability, live_delta, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT OR IGNORE INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, football_home_probability, expected_home_margin, market_expected_home_margin, home_spread, home_cover_probability, model_version, favorite_probability, live_delta, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           SEASON,
@@ -468,6 +672,12 @@ export async function capturePredictions(
           item.predictedWinner,
           item.homeProbability,
           item.marketHomeProbability,
+          item.footballHomeProbability,
+          item.expectedHomeMargin,
+          item.marketExpectedHomeMargin,
+          item.homeSpread,
+          item.homeCoverProbability,
+          item.modelVersion,
           item.favoriteProbability,
           item.liveDelta,
           now,
@@ -531,7 +741,8 @@ export async function saveMarketSnapshots(
 export async function learningDashboard(): Promise<LearningDashboard> {
   await syncAndLearn();
   const database = db();
-  const [all, outcomes, runs, pending] = await Promise.all([
+  const [all, outcomes, runs, pending, postmortemCounts, notable, specialists] =
+    await Promise.all([
     database
       .prepare(
         `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END), 0) AS correct, COALESCE(SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END), 0) AS incorrect, AVG(CASE WHEN winner IS NOT NULL THEN (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - home_probability) * (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - home_probability) END) AS brier, AVG(CASE WHEN winner IS NOT NULL AND market_home_probability IS NOT NULL THEN (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - market_home_probability) * (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - market_home_probability) END) AS market_brier, COALESCE(SUM(CASE WHEN winner IS NULL THEN 1 ELSE 0 END), 0) AS pending FROM prediction_snapshots WHERE season = ?`,
@@ -584,6 +795,34 @@ export async function learningDashboard(): Promise<LearningDashboard> {
       )
       .bind(SEASON)
       .first<{ count: number }>(),
+    database
+      .prepare(
+        `SELECT COUNT(*) AS postmortems, COALESCE(SUM(CASE WHEN correct = 0 AND error_severity >= 20 THEN 1 ELSE 0 END), 0) AS errors, COALESCE(SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END), 0) AS successes FROM game_postmortems WHERE season = ?`,
+      )
+      .bind(SEASON)
+      .first<{ postmortems: number; errors: number; successes: number }>(),
+    database
+      .prepare(
+        `SELECT game_key, week, correct, error_severity, taxonomy_json FROM game_postmortems WHERE season = ? ORDER BY error_severity DESC, id DESC LIMIT 5`,
+      )
+      .bind(SEASON)
+      .all<{
+        game_key: string;
+        week: number;
+        correct: number;
+        error_severity: number;
+        taxonomy_json: string;
+      }>(),
+    database
+      .prepare(
+        `SELECT code, status, production_weight, evidence FROM specialist_registry ORDER BY production_weight DESC, code`,
+      )
+      .all<{
+        code: string;
+        status: string;
+        production_weight: number;
+        evidence: string;
+      }>(),
   ]);
   const total = all?.total ?? 0;
   return {
@@ -627,8 +866,26 @@ export async function learningDashboard(): Promise<LearningDashboard> {
       insight: item.insight,
       createdAt: item.created_at,
     })),
+    memory: {
+      postmortems: postmortemCounts?.postmortems ?? 0,
+      errors: postmortemCounts?.errors ?? 0,
+      successes: postmortemCounts?.successes ?? 0,
+      notable: notable.results.map((item) => ({
+        gameKey: item.game_key,
+        week: item.week,
+        correct: Boolean(item.correct),
+        errorSeverity: item.error_severity,
+        taxonomy: safeJsonArray(item.taxonomy_json),
+      })),
+      specialists: specialists.results.map((item) => ({
+        code: item.code,
+        status: item.status,
+        productionWeight: item.production_weight,
+        evidence: item.evidence,
+      })),
+    },
     pendingSnapshots: pending?.count ?? 0,
-    note: 'Predictions are frozen before kickoff. A completed week creates an audit after at least 12 captured final games, but football parameters move only when at least 48 season-to-date snapshots show a pre-set persistent residual. V2 remains market-anchored when a paired live market probability exists.',
+    note: 'Predictions are frozen before kickoff. Final scores create a postmortem before that game enters error or success memory, so only later games can retrieve it. A completed week creates an audit after at least 12 captured final games, but football parameters move only when at least 48 season-to-date snapshots show a pre-set persistent residual. V2 remains market-anchored when a paired live market probability exists.',
   };
 }
 

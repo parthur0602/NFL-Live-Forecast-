@@ -19,6 +19,12 @@ export const predictionSnapshots = sqliteTable(
     predictedWinner: text('predicted_winner').notNull(),
     homeProbability: real('home_probability').notNull(),
     marketHomeProbability: real('market_home_probability'),
+    footballHomeProbability: real('football_home_probability'),
+    expectedHomeMargin: real('expected_home_margin'),
+    marketExpectedHomeMargin: real('market_expected_home_margin'),
+    homeSpread: real('home_spread'),
+    homeCoverProbability: real('home_cover_probability'),
+    modelVersion: text('model_version'),
     favoriteProbability: real('favorite_probability').notNull(),
     liveDelta: real('live_delta').notNull().default(0),
     capturedAt: text('captured_at').notNull(),
@@ -36,6 +42,82 @@ export const predictionSnapshots = sqliteTable(
       table.settledAt,
     ),
   ],
+);
+
+export const gamePostmortems = sqliteTable(
+  'game_postmortems',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    snapshotId: integer('snapshot_id').notNull(),
+    season: integer('season').notNull(),
+    week: integer('week').notNull(),
+    gameKey: text('game_key').notNull(),
+    modelVersion: text('model_version').notNull(),
+    predictedWinner: text('predicted_winner').notNull(),
+    actualWinner: text('actual_winner').notNull(),
+    homeProbability: real('home_probability').notNull(),
+    marketHomeProbability: real('market_home_probability'),
+    expectedHomeMargin: real('expected_home_margin'),
+    actualHomeMargin: real('actual_home_margin').notNull(),
+    correct: integer('correct', { mode: 'boolean' }).notNull(),
+    errorSeverity: real('error_severity').notNull(),
+    probabilitySurprise: real('probability_surprise').notNull(),
+    taxonomyJson: text('taxonomy_json').notNull(),
+    pregameFeaturesJson: text('pregame_features_json').notNull(),
+    dataQuality: text('data_quality').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_game_postmortems_snapshot').on(table.snapshotId),
+    index('idx_game_postmortems_season_week').on(table.season, table.week),
+    index('idx_game_postmortems_severity').on(table.errorSeverity),
+  ],
+);
+
+export const errorMemory = sqliteTable(
+  'error_memory',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    snapshotId: integer('snapshot_id').notNull(),
+    gameKey: text('game_key').notNull(),
+    severity: real('severity').notNull(),
+    pregameFeaturesJson: text('pregame_features_json').notNull(),
+    lesson: text('lesson').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_error_memory_snapshot').on(table.snapshotId),
+    index('idx_error_memory_severity').on(table.severity),
+  ],
+);
+
+export const successMemory = sqliteTable(
+  'success_memory',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    snapshotId: integer('snapshot_id').notNull(),
+    gameKey: text('game_key').notNull(),
+    pregameFeaturesJson: text('pregame_features_json').notNull(),
+    lesson: text('lesson').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_success_memory_snapshot').on(table.snapshotId),
+    index('idx_success_memory_game').on(table.gameKey),
+  ],
+);
+
+export const specialistRegistry = sqliteTable(
+  'specialist_registry',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    code: text('code').notNull(),
+    status: text('status').notNull(),
+    productionWeight: real('production_weight').notNull().default(0),
+    evidence: text('evidence').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [uniqueIndex('uq_specialist_registry_code').on(table.code)],
 );
 
 export const marketSnapshots = sqliteTable(

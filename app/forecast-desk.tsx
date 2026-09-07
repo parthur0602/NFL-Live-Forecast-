@@ -84,6 +84,24 @@ type Learning = {
     favoriteProbability: number;
     capturedAt: string;
   }>;
+  memory: {
+    postmortems: number;
+    errors: number;
+    successes: number;
+    notable: Array<{
+      gameKey: string;
+      week: number;
+      correct: boolean;
+      errorSeverity: number;
+      taxonomy: string[];
+    }>;
+    specialists: Array<{
+      code: string;
+      status: string;
+      productionWeight: number;
+      evidence: string;
+    }>;
+  };
   pendingSnapshots: number;
   note: string;
 };
@@ -305,6 +323,74 @@ type HistoricalBacktest = {
       logLoss: number | null;
       marginMae: number | null;
     };
+  };
+  v4: {
+    modelVersion: string;
+    champion: string;
+    protocol: string;
+    metrics: BacktestMetric;
+    replay: {
+      gamesStudied: number;
+      predictionLocks: number;
+      individualPostmortems: number;
+      errorMemory: number;
+      successMemory: number;
+      significantErrors: number;
+      likelyVarianceOutcomes: number;
+      recurringErrorClusters: number;
+      hypothesesGenerated: number;
+      hypothesesValidated: number;
+      hypothesesRejected: number;
+      specialistsPromoted: number;
+      championChanged: boolean;
+    };
+    taxonomy: Array<{ label: string; count: number }>;
+    experts: Array<{
+      name: string;
+      availability: string;
+      games: number;
+      significantErrors: number;
+      comparableSuccesses: number;
+      errorRate: number | null;
+      status: string;
+      productionWeight: number;
+      decision: string;
+    }>;
+    clusters: Array<{
+      label: string;
+      games: number;
+      significantErrors: number;
+      comparableSuccesses: number;
+      errorRate: number | null;
+      status: string;
+    }>;
+    hypotheses: Array<{
+      statement: string;
+      status: string;
+      productionEligible: boolean;
+    }>;
+    learningCurve: Array<{
+      games: number;
+      v4Brier: number;
+      marketBrier: number;
+      note: string;
+    }>;
+    postmortems: Array<{
+      gameId: string;
+      season: number;
+      week: number;
+      away: string;
+      home: string;
+      predictedWinner: string;
+      actualWinner: string;
+      correct: boolean;
+      errorSeverity: number;
+      taxonomy: string[];
+      priorSimilarErrors: number;
+      priorSimilarSuccesses: number;
+      lesson: string;
+    }>;
+    guardrails: string[];
   };
 };
 type RenderedGame = Game & {
@@ -778,6 +864,19 @@ export function ForecastDesk() {
               homeProbability: game.adjustedHome,
               marketHomeProbability:
                 game.market?.homeImpliedProbability ?? null,
+              footballHomeProbability: game.footballHome,
+              expectedHomeMargin: game.expectedMargin,
+              marketExpectedHomeMargin:
+                game.market?.homeSpread === null ||
+                game.market?.homeSpread === undefined
+                  ? null
+                  : -game.market.homeSpread,
+              homeSpread: game.market?.homeSpread ?? null,
+              homeCoverProbability: homeCoverProbability(
+                game.expectedMargin,
+                game.market?.homeSpread ?? null,
+              ),
+              modelVersion: 'V4.0-ERROR-MEMORY-SHADOW',
               favoriteProbability: homeFavorite
                 ? game.adjustedHome
                 : 1 - game.adjustedHome,
@@ -905,6 +1004,7 @@ export function ForecastDesk() {
               />
             </div>
             {historical && <CurrentBenchmarkPanel historical={historical} />}
+            {historical && <SelfLearningLab historical={historical} />}
             {historicalError && <Notice tone="warn" text={historicalError} />}
             {learning && <LearningPanel learning={learning} />}
             {forecast && <BettingBoard games={renderedGames} market={market} />}
@@ -1358,6 +1458,139 @@ function BettingBoard({
           </div>
         </>
       )}
+    </section>
+  );
+}
+function SelfLearningLab({ historical }: { historical: HistoricalBacktest }) {
+  const v4 = historical.v4;
+  return (
+    <section className="mb-5 overflow-hidden rounded-2xl border border-emerald-300/20 bg-[#09283a]/95 shadow-xl shadow-black/10">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-sky-100/10 px-5 py-4">
+        <div className="flex gap-3">
+          <div className="grid size-9 place-items-center rounded-xl bg-emerald-300/12 text-emerald-200">
+            <BrainCircuit className="size-5" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[.16em] text-emerald-200">
+              V4 self-learning lab
+            </p>
+            <h3 className="mt-0.5 font-bold text-white">
+              Error memory and success memory — forward only.
+            </h3>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
+              {v4.protocol}
+            </p>
+          </div>
+        </div>
+        <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100">
+          {v4.champion}
+        </span>
+      </div>
+
+      <div className="grid divide-y divide-sky-100/10 border-b border-sky-100/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+        <HistoricalMetric
+          label="Locked postmortems"
+          value={v4.replay.individualPostmortems.toLocaleString()}
+          detail={`${v4.replay.predictionLocks.toLocaleString()} forecast locks`}
+        />
+        <HistoricalMetric
+          label="Error memory"
+          value={v4.replay.errorMemory.toLocaleString()}
+          detail="Substantial misses retained"
+        />
+        <HistoricalMetric
+          label="Success memory"
+          value={v4.replay.successMemory.toLocaleString()}
+          detail="Comparable normal outcomes"
+        />
+        <HistoricalMetric
+          label="Specialists active"
+          value={`${v4.replay.specialistsPromoted}`}
+          detail="All research experts remain at 0%"
+        />
+      </div>
+
+      <div className="grid gap-4 p-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)]">
+        <div className="overflow-x-auto rounded-xl border border-sky-100/10">
+          <table className="w-full min-w-[620px] text-left text-xs">
+            <caption className="border-b border-sky-100/10 bg-[#071a28]/65 px-4 py-3 text-left font-bold uppercase tracking-[.13em] text-slate-400">
+              Mixture-of-experts registry — shadow research only
+            </caption>
+            <thead className="bg-[#071a28]/40 uppercase tracking-[.1em] text-slate-500">
+              <tr>
+                <th className="px-3 py-2.5 font-semibold">Specialist</th>
+                <th className="px-3 py-2.5 font-semibold">Games</th>
+                <th className="px-3 py-2.5 font-semibold">Error / success memory</th>
+                <th className="px-3 py-2.5 font-semibold">Weight</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-sky-100/8 text-slate-200">
+              {v4.experts.map((expert) => (
+                <tr key={expert.name} className="bg-[#0b2030]/50">
+                  <td className="px-3 py-3">
+                    <p className="font-semibold text-white">{expert.name}</p>
+                    <p className="mt-0.5 max-w-[310px] text-[11px] leading-4 text-slate-500">{expert.availability}</p>
+                  </td>
+                  <td className="px-3 py-3">{expert.games || '—'}</td>
+                  <td className="px-3 py-3">
+                    {expert.significantErrors} / {expert.comparableSuccesses}
+                  </td>
+                  <td className="px-3 py-3 font-semibold text-emerald-200">
+                    {(expert.productionWeight * 100).toFixed(0)}% · {expert.status}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="space-y-3">
+          <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+              Promotion rule
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              A specialist earns weight only after it beats the production champion
+              on later, timestamp-matched games. It starts at 0%, not at a
+              hand-picked football assumption.
+            </p>
+          </div>
+          <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+              Replay verdict
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              {v4.replay.hypothesesGenerated} research hypotheses found ·{' '}
+              {v4.replay.hypothesesValidated} promoted ·{' '}
+              {v4.replay.likelyVarianceOutcomes} likely-variance outcomes.
+              The champion did not change.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <details className="border-t border-sky-100/10 bg-[#071a28]/30 px-5 py-4 text-sm">
+        <summary className="cursor-pointer font-semibold text-sky-200">
+          Review the strongest historical postmortems and safeguards
+        </summary>
+        <div className="mt-3 grid gap-4 xl:grid-cols-2">
+          <div className="space-y-2">
+            {v4.postmortems.slice(0, 4).map((postmortem) => (
+              <div key={postmortem.gameId} className="rounded-lg border border-sky-100/8 bg-[#0b2030]/70 px-3 py-2.5 text-xs">
+                <p className="font-semibold text-slate-100">
+                  {postmortem.season} W{postmortem.week} · {postmortem.away} at {postmortem.home}
+                </p>
+                <p className="mt-1 leading-5 text-slate-400">
+                  Called {postmortem.predictedWinner}; {postmortem.actualWinner} won · severity {postmortem.errorSeverity.toFixed(0)}/100 · prior analogs: {postmortem.priorSimilarErrors} errors / {postmortem.priorSimilarSuccesses} successes.
+                </p>
+              </div>
+            ))}
+          </div>
+          <ul className="space-y-2 pl-5 text-xs leading-5 text-slate-300">
+            {v4.guardrails.map((guardrail) => <li key={guardrail}>{guardrail}</li>)}
+          </ul>
+        </div>
+      </details>
     </section>
   );
 }
@@ -1895,7 +2128,7 @@ function LearningPanel({ learning }: { learning: Learning }) {
           </p>
         </div>
       </div>
-      <div className="grid gap-px bg-sky-100/10 sm:grid-cols-4">
+      <div className="grid gap-px bg-sky-100/10 sm:grid-cols-5">
         <LearningMetric
           label="Correct picks"
           value={String(learning.record.correct)}
@@ -1927,6 +2160,11 @@ function LearningPanel({ learning }: { learning: Learning }) {
           label="Frozen forecasts"
           value={String(learning.record.captured)}
           detail={`${learning.pendingSnapshots} awaiting result`}
+        />
+        <LearningMetric
+          label="Memory ledger"
+          value={String(learning.memory.postmortems)}
+          detail={`${learning.memory.errors} error · ${learning.memory.successes} success`}
         />
       </div>
       <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -1961,6 +2199,9 @@ function LearningPanel({ learning }: { learning: Learning }) {
             {learning.state.completedWeeks} completed weekly audit
             {learning.state.completedWeeks === 1 ? '' : 's'}; every adjustment
             is capped.
+          </p>
+          <p className="mt-2 text-xs leading-5 text-slate-400">
+            {learning.memory.specialists.filter((expert) => expert.productionWeight > 0 && expert.code !== 'market_baseline').length} V4 specialists have earned live weight.
           </p>
         </div>
       </div>
