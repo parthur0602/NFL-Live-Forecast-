@@ -196,6 +196,63 @@ database.exec(`
     ON football_state_snapshots (season, team, observed_at);
   CREATE INDEX idx_football_state_type_time
     ON football_state_snapshots (season, state_type, observed_at);
+  CREATE TABLE team_efficiency_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    team TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_url TEXT,
+    observed_at TEXT NOT NULL,
+    capture_bucket TEXT NOT NULL,
+    games_in_sample INTEGER NOT NULL,
+    passing_epa REAL,
+    rushing_epa REAL,
+    receiving_epa REAL,
+    passing_success_rate REAL,
+    rushing_success_rate REAL,
+    completion_percentage REAL,
+    yards_per_attempt REAL,
+    sack_rate REAL,
+    turnover_rate REAL,
+    payload_json TEXT NOT NULL,
+    eligible_for_model INTEGER DEFAULT 1 NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_team_efficiency_team_week_bucket
+    ON team_efficiency_snapshots (season, week, team, capture_bucket);
+  CREATE INDEX idx_team_efficiency_team_time
+    ON team_efficiency_snapshots (season, team, observed_at);
+  CREATE INDEX idx_team_efficiency_week
+    ON team_efficiency_snapshots (season, week);
+  CREATE TABLE player_availability_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    team TEXT NOT NULL,
+    player_id TEXT,
+    player_name TEXT NOT NULL,
+    position TEXT,
+    depth_role TEXT,
+    status TEXT NOT NULL,
+    practice_status TEXT,
+    availability_probability REAL,
+    expected_snap_share REAL,
+    replacement_value REAL,
+    source TEXT NOT NULL,
+    source_url TEXT,
+    observed_at TEXT NOT NULL,
+    capture_bucket TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    eligible_for_model INTEGER DEFAULT 0 NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_player_availability_signal_bucket
+    ON player_availability_snapshots (
+      season, week, team, player_name, source, capture_bucket
+    );
+  CREATE INDEX idx_player_availability_team_time
+    ON player_availability_snapshots (season, team, observed_at);
+  CREATE INDEX idx_player_availability_position_time
+    ON player_availability_snapshots (season, position, observed_at);
 `);
 
 class LocalStatement {

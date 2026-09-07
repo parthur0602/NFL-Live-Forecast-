@@ -135,6 +135,99 @@ export const footballStateSnapshots = sqliteTable(
   ],
 );
 
+// Structured, game-complete team statistics for forward-only specialist
+// research. These are not connected to the live V2 probability path.
+export const teamEfficiencySnapshots = sqliteTable(
+  'team_efficiency_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    season: integer('season').notNull(),
+    week: integer('week').notNull(),
+    team: text('team').notNull(),
+    source: text('source').notNull(),
+    sourceUrl: text('source_url'),
+    observedAt: text('observed_at').notNull(),
+    captureBucket: text('capture_bucket').notNull(),
+    gamesInSample: integer('games_in_sample').notNull(),
+    passingEpa: real('passing_epa'),
+    rushingEpa: real('rushing_epa'),
+    receivingEpa: real('receiving_epa'),
+    passingSuccessRate: real('passing_success_rate'),
+    rushingSuccessRate: real('rushing_success_rate'),
+    completionPercentage: real('completion_percentage'),
+    yardsPerAttempt: real('yards_per_attempt'),
+    sackRate: real('sack_rate'),
+    turnoverRate: real('turnover_rate'),
+    payloadJson: text('payload_json').notNull(),
+    eligibleForModel: integer('eligible_for_model', { mode: 'boolean' })
+      .notNull()
+      .default(true),
+  },
+  (table) => [
+    uniqueIndex('uq_team_efficiency_team_week_bucket').on(
+      table.season,
+      table.week,
+      table.team,
+      table.captureBucket,
+    ),
+    index('idx_team_efficiency_team_time').on(
+      table.season,
+      table.team,
+      table.observedAt,
+    ),
+    index('idx_team_efficiency_week').on(table.season, table.week),
+  ],
+);
+
+// Structured availability observations are stored exactly as sourced. They
+// remain ineligible for production unless a future, validated source says so.
+export const playerAvailabilitySnapshots = sqliteTable(
+  'player_availability_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    season: integer('season').notNull(),
+    week: integer('week').notNull(),
+    team: text('team').notNull(),
+    playerId: text('player_id'),
+    playerName: text('player_name').notNull(),
+    position: text('position'),
+    depthRole: text('depth_role'),
+    status: text('status').notNull(),
+    practiceStatus: text('practice_status'),
+    availabilityProbability: real('availability_probability'),
+    expectedSnapShare: real('expected_snap_share'),
+    replacementValue: real('replacement_value'),
+    source: text('source').notNull(),
+    sourceUrl: text('source_url'),
+    observedAt: text('observed_at').notNull(),
+    captureBucket: text('capture_bucket').notNull(),
+    payloadJson: text('payload_json').notNull(),
+    eligibleForModel: integer('eligible_for_model', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+  },
+  (table) => [
+    uniqueIndex('uq_player_availability_signal_bucket').on(
+      table.season,
+      table.week,
+      table.team,
+      table.playerName,
+      table.source,
+      table.captureBucket,
+    ),
+    index('idx_player_availability_team_time').on(
+      table.season,
+      table.team,
+      table.observedAt,
+    ),
+    index('idx_player_availability_position_time').on(
+      table.season,
+      table.position,
+      table.observedAt,
+    ),
+  ],
+);
+
 export const gamePostmortems = sqliteTable(
   'game_postmortems',
   {
