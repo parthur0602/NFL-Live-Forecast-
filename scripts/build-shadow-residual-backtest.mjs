@@ -226,7 +226,9 @@ function calibration(rows, probabilityKey) {
       label: `${Math.round(lower * 100)}-${Math.round((upper - 0.001) * 100)}%`,
       games: bucket.length,
       predicted: mean(bucket.map((row) => Math.max(row[probabilityKey], 1 - row[probabilityKey]))),
-      actual: mean(bucket.map((row) => ((row[probabilityKey] >= 0.5 ? 1 : 0) === row.y ? 1 : 0)),
+      actual: mean(bucket.map((row) =>
+        (row[probabilityKey] >= 0.5 ? 1 : 0) === row.y ? 1 : 0,
+      )),
     }];
   });
 }
@@ -264,7 +266,12 @@ const games = scheduleRows
 const featureRows = [];
 for (const game of games) {
   const seasonStats = statsBySeason.get(game.season) ?? [];
-  const prior = seasonStats.filter((row) => row.season_type === 'REG' && Number(row.week) < game.week);
+  const prior = seasonStats.filter(
+    (row) =>
+      Number(row.season) === game.season &&
+      row.season_type === 'REG' &&
+      Number(row.week) < game.week,
+  );
   const homeRows = prior.filter((row) => (row.team || row.recent_team || row.posteam) === game.home);
   const awayRows = prior.filter((row) => (row.team || row.recent_team || row.posteam) === game.away);
   if (!homeRows.length || !awayRows.length) continue;
