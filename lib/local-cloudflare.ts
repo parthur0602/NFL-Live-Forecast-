@@ -173,6 +173,29 @@ database.exec(`
     ON market_snapshots (season, week);
   CREATE INDEX idx_market_snapshots_game_time
     ON market_snapshots (game_key, observed_at);
+  CREATE TABLE football_state_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    team TEXT NOT NULL,
+    state_type TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    status TEXT,
+    source TEXT NOT NULL,
+    source_url TEXT,
+    observed_at TEXT NOT NULL,
+    capture_bucket TEXT NOT NULL,
+    confidence REAL,
+    payload_json TEXT NOT NULL,
+    eligible_for_model INTEGER DEFAULT 0 NOT NULL
+  );
+  CREATE UNIQUE INDEX uq_football_state_signal_bucket
+    ON football_state_snapshots (
+      season, team, state_type, subject, source, capture_bucket
+    );
+  CREATE INDEX idx_football_state_team_time
+    ON football_state_snapshots (season, team, observed_at);
+  CREATE INDEX idx_football_state_type_time
+    ON football_state_snapshots (season, state_type, observed_at);
 `);
 
 class LocalStatement {

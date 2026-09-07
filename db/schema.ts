@@ -91,6 +91,50 @@ export const forecastLedger = sqliteTable(
   ],
 );
 
+// Timestamped research evidence only. Unstructured reports are deliberately
+// ineligible for production forecasts until a specialist proves incremental
+// value in chronological, timestamp-matched evaluation.
+export const footballStateSnapshots = sqliteTable(
+  'football_state_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    season: integer('season').notNull(),
+    team: text('team').notNull(),
+    stateType: text('state_type').notNull(),
+    subject: text('subject').notNull(),
+    status: text('status'),
+    source: text('source').notNull(),
+    sourceUrl: text('source_url'),
+    observedAt: text('observed_at').notNull(),
+    captureBucket: text('capture_bucket').notNull(),
+    confidence: real('confidence'),
+    payloadJson: text('payload_json').notNull(),
+    eligibleForModel: integer('eligible_for_model', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+  },
+  (table) => [
+    uniqueIndex('uq_football_state_signal_bucket').on(
+      table.season,
+      table.team,
+      table.stateType,
+      table.subject,
+      table.source,
+      table.captureBucket,
+    ),
+    index('idx_football_state_team_time').on(
+      table.season,
+      table.team,
+      table.observedAt,
+    ),
+    index('idx_football_state_type_time').on(
+      table.season,
+      table.stateType,
+      table.observedAt,
+    ),
+  ],
+);
+
 export const gamePostmortems = sqliteTable(
   'game_postmortems',
   {
