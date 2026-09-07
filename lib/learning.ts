@@ -79,84 +79,102 @@ function db() {
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
-function isoDay(day: Date) {
-  return day.toISOString().slice(0, 10).replaceAll('-', '');
+type ScheduleTeam = {
+  displayName?: string;
+  isHome?: boolean;
+  score?: number | string | null;
+};
+type ScheduleEvent = {
+  completed?: boolean;
+  teams?: ScheduleTeam[];
+  competitors?: ScheduleTeam[];
+  status?: { state?: string };
+};
+
+function readJsonObject(source: string, marker: string) {
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0)
+    throw new Error('The schedule page did not contain event data.');
+  const start = markerIndex + marker.length - 1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return JSON.parse(source.slice(start, index + 1));
+    }
+  }
+  throw new Error('The schedule event data was incomplete.');
 }
 
-function weekDates(week: number) {
-  const start = new Date(Date.UTC(2026, 8, 9 + (week - 1) * 7));
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 6);
-  return `${isoDay(start)}-${isoDay(end)}`;
+async function scheduleEventsForWeek(week: number): Promise<ScheduleEvent[]> {
+  const source = `https://www.espn.com/nfl/schedule/_/week/${week}/year/${SEASON}/seasontype/2`;
+  const response = await fetch(source, { cache: 'no-store' });
+  if (!response.ok)
+    throw new Error(`Schedule result source returned ${response.status}.`);
+  const events = readJsonObject(await response.text(), '"events":{') as Record<
+    string,
+    ScheduleEvent[]
+  >;
+  return Object.values(events).flat();
+}
+
+function teamsFor(event: ScheduleEvent) {
+  const teams = event.competitors ?? event.teams ?? [];
+  return {
+    away: teams.find((team) => team.isHome === false),
+    home: teams.find((team) => team.isHome === true),
+  };
 }
 
 async function resultsForWeek(week: number): Promise<ScoreboardResult[]> {
-  const source = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${weekDates(week)}&limit=100`;
-  const response = await fetch(source, { cache: 'no-store' });
-  if (!response.ok)
-    throw new Error(`Results feed returned ${response.status}.`);
-  const body = (await response.json()) as {
-    events?: Array<{
-      status?: { type?: { completed?: boolean } };
-      competitions?: Array<{
-        competitors?: Array<{
-          homeAway?: string;
-          team?: { displayName?: string };
-          score?: string;
-        }>;
-      }>;
-    }>;
-  };
-  return (body.events ?? []).flatMap((event) => {
-    if (!event.status?.type?.completed) return [];
-    const competitors = event.competitions?.[0]?.competitors ?? [];
-    const away = competitors.find((team) => team.homeAway === 'away');
-    const home = competitors.find((team) => team.homeAway === 'home');
-    const awayScore = Number(away?.score);
-    const homeScore = Number(home?.score);
+  return (await scheduleEventsForWeek(week)).flatMap((event) => {
+    if (!event.completed && event.status?.state !== 'post') return [];
+    const { away, home } = teamsFor(event);
     if (
-      !away?.team?.displayName ||
-      !home?.team?.displayName ||
+      away?.score === null ||
+      away?.score === undefined ||
+      home?.score === null ||
+      home?.score === undefined
+    )
+      return [];
+    const awayScore = Number(away.score);
+    const homeScore = Number(home.score);
+    if (
+      !away.displayName ||
+      !home.displayName ||
       !Number.isFinite(awayScore) ||
       !Number.isFinite(homeScore)
     )
       return [];
     return [
-      {
-        away: away.team.displayName,
-        home: home.team.displayName,
-        awayScore,
-        homeScore,
-      },
+      { away: away.displayName, home: home.displayName, awayScore, homeScore },
     ];
   });
 }
 
 async function startedGameKeysForWeek(week: number) {
-  const source = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${weekDates(week)}&limit=100`;
-  const response = await fetch(source, { cache: 'no-store' });
-  if (!response.ok)
-    throw new Error(`Kickoff-status feed returned ${response.status}.`);
-  const body = (await response.json()) as {
-    events?: Array<{
-      status?: { type?: { state?: string } };
-      competitions?: Array<{
-        competitors?: Array<{
-          homeAway?: string;
-          team?: { displayName?: string };
-        }>;
-      }>;
-    }>;
-  };
   return new Set(
-    (body.events ?? []).flatMap((event) => {
-      if (event.status?.type?.state === 'pre') return [];
-      const competitors = event.competitions?.[0]?.competitors ?? [];
-      const away = competitors.find((team) => team.homeAway === 'away')?.team
-        ?.displayName;
-      const home = competitors.find((team) => team.homeAway === 'home')?.team
-        ?.displayName;
-      return away && home ? [`${away}__${home}`] : [];
+    (await scheduleEventsForWeek(week)).flatMap((event) => {
+      if (
+        !event.completed &&
+        (!event.status?.state || event.status.state === 'pre')
+      )
+        return [];
+      const { away, home } = teamsFor(event);
+      return away?.displayName && home?.displayName
+        ? [`${away.displayName}__${home.displayName}`]
+        : [];
     }),
   );
 }
