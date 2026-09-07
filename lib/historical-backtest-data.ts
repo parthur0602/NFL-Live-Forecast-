@@ -13,7 +13,7 @@ export const HISTORICAL_BACKTEST = {
     2024,
     2025
   ],
-  "generatedAt": "2026-09-07T19:32:59.379Z",
+  "generatedAt": "2026-09-07T21:13:14.860Z",
   "methodology": {
     "label": "Common-feature chronological strength + venue replay",
     "homeFieldEdge": 1.1,
@@ -1933,7 +1933,7 @@ export const HISTORICAL_BACKTEST = {
     "modelVersion": "V4.0-ERROR-MEMORY-SHADOW",
     "label": "Current V4 error-memory shadow benchmark",
     "status": "Shadow — V2 remains champion",
-    "evaluatedAt": "2026-09-07T19:32:59.379Z",
+    "evaluatedAt": "2026-09-07T21:13:14.860Z",
     "scope": "2021–2025 regular season and postseason; decided games only",
     "metrics": {
       "games": 1420,

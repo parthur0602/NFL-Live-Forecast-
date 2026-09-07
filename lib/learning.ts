@@ -2,8 +2,8 @@ import { env } from 'cloudflare:workers';
 import { DEFAULT_LEARNED_MODEL, type LearnedModelState } from '@/lib/forecast';
 
 const SEASON = 2026;
-const MAX_HOME_EDGE_STEP = 0.05;
-const MAX_SHRINK_STEP = 0.015;
+const MAX_HOME_FIELD_ADJUSTMENT = 0.5;
+const MAX_CONFIDENCE_SHRINKAGE = 0.15;
 const MIN_CALIBRATION_SAMPLE = 48;
 const MIN_STABLE_RESIDUAL = 0.025;
 
@@ -36,6 +36,24 @@ type ScoreboardResult = {
   home: string;
   awayScore: number;
   homeScore: number;
+};
+
+type CaptureItem = {
+  week: number;
+  gameKey: string;
+  away: string;
+  home: string;
+  predictedWinner: string;
+  homeProbability: number;
+  marketHomeProbability: number | null;
+  footballHomeProbability: number | null;
+  expectedHomeMargin: number | null;
+  marketExpectedHomeMargin: number | null;
+  homeSpread: number | null;
+  homeCoverProbability: number | null;
+  modelVersion: string | null;
+  favoriteProbability: number;
+  liveDelta: number;
 };
 
 export type LearningRun = {
@@ -71,7 +89,10 @@ export type LearningDashboard = {
     brierScore: number | null;
     marketBrierScore: number | null;
     brierDeltaVsMarket: number | null;
+    expectedLosses: number | null;
+    excessLosses: number | null;
     captured: number;
+    prospectiveSnapshots: number;
   };
   runs: LearningRun[];
   outcomes: PickOutcome[];
@@ -116,16 +137,18 @@ function safeJsonArray(value: string) {
   }
 }
 function postmortemFor(snapshot: Snapshot, result: ScoreboardResult) {
-  const correct = snapshot.predicted_winner ===
+  const correct =
+    snapshot.predicted_winner ===
     (result.homeScore > result.awayScore ? result.home : result.away);
   const actualHomeWin = result.homeScore > result.awayScore ? 1 : 0;
   const probabilitySurprise = -Math.log(
     correct ? snapshot.favorite_probability : 1 - snapshot.favorite_probability,
   );
   const actualHomeMargin = result.homeScore - result.awayScore;
-  const marginError = snapshot.expected_home_margin === null
-    ? 0
-    : Math.abs(snapshot.expected_home_margin - actualHomeMargin);
+  const marginError =
+    snapshot.expected_home_margin === null
+      ? 0
+      : Math.abs(snapshot.expected_home_margin - actualHomeMargin);
   const errorSeverity = Math.min(
     100,
     100 *
@@ -139,15 +162,17 @@ function postmortemFor(snapshot: Snapshot, result: ScoreboardResult) {
   if (
     snapshot.football_home_probability !== null &&
     snapshot.market_home_probability !== null &&
-    Math.abs(snapshot.football_home_probability - snapshot.market_home_probability) >=
-      0.08 &&
+    Math.abs(
+      snapshot.football_home_probability - snapshot.market_home_probability,
+    ) >= 0.08 &&
     Math.pow(snapshot.football_home_probability - actualHomeWin, 2) >
       Math.pow(snapshot.market_home_probability - actualHomeWin, 2)
   )
     taxonomy.push('MARKET_CORRECTION_ERROR');
   if (!correct && snapshot.favorite_probability < 0.6)
     taxonomy.push('UNPREDICTABLE_EVENT');
-  if (!taxonomy.length) taxonomy.push(correct ? 'CALIBRATED_OUTCOME' : 'UNKNOWN');
+  if (!taxonomy.length)
+    taxonomy.push(correct ? 'CALIBRATED_OUTCOME' : 'UNKNOWN');
   const features = {
     footballHomeProbability: snapshot.football_home_probability,
     marketHomeProbability: snapshot.market_home_probability,
@@ -175,7 +200,8 @@ const SPECIALIST_STARTERS = [
     code: 'market_baseline',
     status: 'PRODUCTION',
     productionWeight: 1,
-    evidence: 'V2 market-anchor remains the production champion until a specialist proves a forward, timestamp-matched improvement.',
+    evidence:
+      'V2 market-anchor remains the production champion until a specialist proves a forward, timestamp-matched improvement.',
   },
   {
     code: 'qb_uncertainty',
@@ -187,19 +213,22 @@ const SPECIALIST_STARTERS = [
     code: 'ol_pass_rush',
     status: 'DATA_REQUIRED',
     productionWeight: 0,
-    evidence: 'Requires timestamped offensive-line availability and pass-rush pressure inputs.',
+    evidence:
+      'Requires timestamped offensive-line availability and pass-rush pressure inputs.',
   },
   {
     code: 'weather',
     status: 'RESEARCH',
     productionWeight: 0,
-    evidence: 'Requires pre-kickoff weather snapshots and chronological out-of-sample validation.',
+    evidence:
+      'Requires pre-kickoff weather snapshots and chronological out-of-sample validation.',
   },
   {
     code: 'key_number',
     status: 'RESEARCH',
     productionWeight: 0,
-    evidence: 'Requires timestamp-matched spread snapshots and forward spread performance.',
+    evidence:
+      'Requires timestamp-matched spread snapshots and forward spread performance.',
   },
 ] as const;
 async function ensureSpecialistRegistry(database: D1Database) {
@@ -357,6 +386,20 @@ async function settleWeek(week: number) {
           analysis.correct ? 1 : 0,
           snapshot.id,
         ),
+      database
+        .prepare(
+          `UPDATE forecast_ledger SET settled_at = ?, away_score = ?, home_score = ?, winner = ?, correct = CASE WHEN predicted_winner = ? THEN 1 ELSE 0 END WHERE season = ? AND week = ? AND game_key = ? AND winner IS NULL`,
+        )
+        .bind(
+          settledAt,
+          result.awayScore,
+          result.homeScore,
+          winner,
+          winner,
+          SEASON,
+          snapshot.week,
+          snapshot.game_key,
+        ),
     ];
     statements.push(
       database
@@ -511,22 +554,24 @@ async function learnCompletedWeek(week: number) {
   const stableHomeResidual = cumulative?.home_residual ?? 0;
   const stableFavoriteResidual = cumulative?.favorite_residual ?? 0;
   const hasStableSample = (cumulative?.count ?? 0) >= MIN_CALIBRATION_SAMPLE;
-  // Weekly scores teach the audit, but parameters move only after a wider,
-  // season-to-date sample clears a small, pre-set residual threshold.
-  const homeEdgeDelta =
+
+  // Store a current target parameter, not another additive nudge. Repeated
+  // weekly audits therefore cannot stack the same persistent residual over and
+  // over. A later audit replaces the target state used by modelState().
+  const homeFieldTarget =
     hasStableSample && Math.abs(stableHomeResidual) >= MIN_STABLE_RESIDUAL
       ? clamp(
           stableHomeResidual * 4.8 * 0.14,
-          -MAX_HOME_EDGE_STEP,
-          MAX_HOME_EDGE_STEP,
+          -MAX_HOME_FIELD_ADJUSTMENT,
+          MAX_HOME_FIELD_ADJUSTMENT,
         )
       : 0;
-  const shrinkageDelta =
+  const shrinkageTarget =
     hasStableSample && stableFavoriteResidual <= -MIN_STABLE_RESIDUAL
       ? clamp(
           Math.abs(stableFavoriteResidual) * 0.08,
           0,
-          MAX_SHRINK_STEP,
+          MAX_CONFIDENCE_SHRINKAGE,
         )
       : 0;
   const now = new Date().toISOString();
@@ -561,9 +606,9 @@ async function learnCompletedWeek(week: number) {
       .bind(
         SEASON,
         week,
-        homeEdgeDelta,
+        homeFieldTarget,
         hasStableSample
-          ? `Season-to-date venue residual through Week ${week}`
+          ? `Current venue calibration target through Week ${week}`
           : `Audit only through Week ${week}; fewer than ${MIN_CALIBRATION_SAMPLE} settled snapshots`,
         cumulative?.count ?? games.length,
         now,
@@ -575,9 +620,9 @@ async function learnCompletedWeek(week: number) {
       .bind(
         SEASON,
         week,
-        shrinkageDelta,
+        shrinkageTarget,
         hasStableSample
-          ? `Season-to-date favorite calibration through Week ${week}`
+          ? `Current confidence-calibration target through Week ${week}`
           : `Audit only through Week ${week}; fewer than ${MIN_CALIBRATION_SAMPLE} settled snapshots`,
         cumulative?.count ?? games.length,
         now,
@@ -608,82 +653,99 @@ export async function modelState(): Promise<LearnedModelState> {
   const adjustments = (
     await database
       .prepare(
-        `SELECT kind, COALESCE(SUM(delta), 0) AS delta, COUNT(*) AS count FROM model_adjustments WHERE season = ? GROUP BY kind`,
+        `SELECT kind, delta, week FROM model_adjustments WHERE season = ? ORDER BY week DESC, id DESC`,
       )
       .bind(SEASON)
-      .all<{ kind: string; delta: number; count: number }>()
+      .all<{ kind: string; delta: number; week: number }>()
   ).results;
   const home = adjustments.find((item) => item.kind === 'home_field');
   const shrink = adjustments.find(
     (item) => item.kind === 'confidence_shrinkage',
   );
   return {
-    completedWeeks: Math.max(home?.count ?? 0, shrink?.count ?? 0),
-    homeFieldAdjustment: clamp(home?.delta ?? 0, -0.5, 0.5),
-    confidenceShrinkage: clamp(shrink?.delta ?? 0, 0, 0.15),
+    completedWeeks: Math.max(home?.week ?? 0, shrink?.week ?? 0),
+    homeFieldAdjustment: clamp(
+      home?.delta ?? 0,
+      -MAX_HOME_FIELD_ADJUSTMENT,
+      MAX_HOME_FIELD_ADJUSTMENT,
+    ),
+    confidenceShrinkage: clamp(
+      shrink?.delta ?? 0,
+      0,
+      MAX_CONFIDENCE_SHRINKAGE,
+    ),
   };
 }
 
-export async function capturePredictions(
-  items: Array<{
-    week: number;
-    gameKey: string;
-    away: string;
-    home: string;
-    predictedWinner: string;
-    homeProbability: number;
-    marketHomeProbability: number | null;
-    footballHomeProbability: number | null;
-    expectedHomeMargin: number | null;
-    marketExpectedHomeMargin: number | null;
-    homeSpread: number | null;
-    homeCoverProbability: number | null;
-    modelVersion: string | null;
-    favoriteProbability: number;
-    liveDelta: number;
-  }>,
-) {
+export async function capturePredictions(items: CaptureItem[]) {
   const database = db();
   const now = new Date().toISOString();
+  const captureBucket = `${now.slice(0, 13)}:00:00.000Z`;
   const candidates = items.slice(0, 18);
   const completed = new Set<string>();
   const started = new Set<string>();
-  for (const week of [...new Set(candidates.map((item) => item.week))]) {
+  for (const week of new Set(candidates.map((item) => item.week))) {
     for (const result of await resultsForWeek(week))
       completed.add(`${result.away}__${result.home}`);
     for (const gameKey of await startedGameKeysForWeek(week))
       started.add(gameKey);
   }
-  const statements = candidates
-    .filter(
-      (item) => !completed.has(item.gameKey) && !started.has(item.gameKey),
-    )
-    .map((item) =>
-      database
-        .prepare(
-          `INSERT OR IGNORE INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, football_home_probability, expected_home_margin, market_expected_home_margin, home_spread, home_cover_probability, model_version, favorite_probability, live_delta, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          SEASON,
-          item.week,
-          item.gameKey,
-          item.away,
-          item.home,
-          item.predictedWinner,
-          item.homeProbability,
-          item.marketHomeProbability,
-          item.footballHomeProbability,
-          item.expectedHomeMargin,
-          item.marketExpectedHomeMargin,
-          item.homeSpread,
-          item.homeCoverProbability,
-          item.modelVersion,
-          item.favoriteProbability,
-          item.liveDelta,
-          now,
-        ),
-    );
-  if (statements.length) await database.batch(statements);
+  const accepted = candidates.filter(
+    (item) => !completed.has(item.gameKey) && !started.has(item.gameKey),
+  );
+  const canonicalStatements = accepted.map((item) =>
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, football_home_probability, expected_home_margin, market_expected_home_margin, home_spread, home_cover_probability, model_version, favorite_probability, live_delta, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        SEASON,
+        item.week,
+        item.gameKey,
+        item.away,
+        item.home,
+        item.predictedWinner,
+        item.homeProbability,
+        item.marketHomeProbability,
+        item.footballHomeProbability,
+        item.expectedHomeMargin,
+        item.marketExpectedHomeMargin,
+        item.homeSpread,
+        item.homeCoverProbability,
+        item.modelVersion,
+        item.favoriteProbability,
+        item.liveDelta,
+        now,
+      ),
+  );
+  const ledgerStatements = accepted.map((item) =>
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO forecast_ledger (season, week, game_key, away_team, home_team, predicted_winner, home_probability, market_home_probability, football_home_probability, expected_home_margin, market_expected_home_margin, home_spread, home_cover_probability, model_version, favorite_probability, live_delta, capture_bucket, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        SEASON,
+        item.week,
+        item.gameKey,
+        item.away,
+        item.home,
+        item.predictedWinner,
+        item.homeProbability,
+        item.marketHomeProbability,
+        item.footballHomeProbability,
+        item.expectedHomeMargin,
+        item.marketExpectedHomeMargin,
+        item.homeSpread,
+        item.homeCoverProbability,
+        item.modelVersion,
+        item.favoriteProbability,
+        item.liveDelta,
+        captureBucket,
+        now,
+      ),
+  );
+  if (canonicalStatements.length || ledgerStatements.length)
+    await database.batch([...canonicalStatements, ...ledgerStatements]);
   const captured = await database
     .prepare(
       `SELECT COUNT(*) AS count FROM prediction_snapshots WHERE season = ?`,
@@ -711,41 +773,47 @@ export async function saveMarketSnapshots(
   }>,
 ) {
   const database = db();
-  const statements = items
-    .slice(0, 18)
-    .map((item) =>
-      database
-        .prepare(
-          `INSERT OR IGNORE INTO market_snapshots (season, week, game_key, source, observed_at, away_moneyline, home_moneyline, away_spread, home_spread, total_line, away_spread_odds, home_spread_odds, over_odds, under_odds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          SEASON,
-          item.week,
-          item.gameKey,
-          item.source,
-          item.observedAt,
-          item.awayMoneyline,
-          item.homeMoneyline,
-          item.awaySpread,
-          item.homeSpread,
-          item.totalLine,
-          item.awaySpreadOdds,
-          item.homeSpreadOdds,
-          item.overOdds,
-          item.underOdds,
-        ),
-    );
+  const statements = items.slice(0, 18).map((item) =>
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO market_snapshots (season, week, game_key, source, observed_at, away_moneyline, home_moneyline, away_spread, home_spread, total_line, away_spread_odds, home_spread_odds, over_odds, under_odds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        SEASON,
+        item.week,
+        item.gameKey,
+        item.source,
+        item.observedAt,
+        item.awayMoneyline,
+        item.homeMoneyline,
+        item.awaySpread,
+        item.homeSpread,
+        item.totalLine,
+        item.awaySpreadOdds,
+        item.homeSpreadOdds,
+        item.overOdds,
+        item.underOdds,
+      ),
+  );
   if (statements.length) await database.batch(statements);
 }
 
 export async function learningDashboard(): Promise<LearningDashboard> {
   await syncAndLearn();
   const database = db();
-  const [all, outcomes, runs, pending, postmortemCounts, notable, specialists] =
-    await Promise.all([
+  const [
+    all,
+    outcomes,
+    runs,
+    pending,
+    postmortemCounts,
+    notable,
+    specialists,
+    ledgerCount,
+  ] = await Promise.all([
     database
       .prepare(
-        `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END), 0) AS correct, COALESCE(SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END), 0) AS incorrect, AVG(CASE WHEN winner IS NOT NULL THEN (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - home_probability) * (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - home_probability) END) AS brier, AVG(CASE WHEN winner IS NOT NULL AND market_home_probability IS NOT NULL THEN (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - market_home_probability) * (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - market_home_probability) END) AS market_brier, COALESCE(SUM(CASE WHEN winner IS NULL THEN 1 ELSE 0 END), 0) AS pending FROM prediction_snapshots WHERE season = ?`,
+        `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END), 0) AS correct, COALESCE(SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END), 0) AS incorrect, AVG(CASE WHEN winner IS NOT NULL THEN (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - home_probability) * (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - home_probability) END) AS brier, AVG(CASE WHEN winner IS NOT NULL AND market_home_probability IS NOT NULL THEN (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - market_home_probability) * (CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END - market_home_probability) END) AS market_brier, SUM(CASE WHEN winner IS NOT NULL THEN 1.0 - favorite_probability ELSE 0 END) AS expected_losses, COALESCE(SUM(CASE WHEN winner IS NULL THEN 1 ELSE 0 END), 0) AS pending FROM prediction_snapshots WHERE season = ?`,
       )
       .bind(SEASON)
       .first<{
@@ -754,6 +822,7 @@ export async function learningDashboard(): Promise<LearningDashboard> {
         incorrect: number;
         brier: number | null;
         market_brier: number | null;
+        expected_losses: number | null;
         pending: number;
       }>(),
     database
@@ -823,8 +892,13 @@ export async function learningDashboard(): Promise<LearningDashboard> {
         production_weight: number;
         evidence: string;
       }>(),
+    database
+      .prepare(`SELECT COUNT(*) AS count FROM forecast_ledger WHERE season = ?`)
+      .bind(SEASON)
+      .first<{ count: number }>(),
   ]);
   const total = all?.total ?? 0;
+  const expectedLosses = all?.expected_losses ?? null;
   return {
     state: await modelState(),
     record: {
@@ -841,7 +915,11 @@ export async function learningDashboard(): Promise<LearningDashboard> {
         all?.market_brier !== undefined
           ? all.brier - all.market_brier
           : null,
+      expectedLosses,
+      excessLosses:
+        expectedLosses === null ? null : (all?.incorrect ?? 0) - expectedLosses,
       captured: total,
+      prospectiveSnapshots: ledgerCount?.count ?? 0,
     },
     outcomes: outcomes.results.map((item) => ({
       id: item.id,
@@ -885,7 +963,8 @@ export async function learningDashboard(): Promise<LearningDashboard> {
       })),
     },
     pendingSnapshots: pending?.count ?? 0,
-    note: 'Predictions are frozen before kickoff. Final scores create a postmortem before that game enters error or success memory, so only later games can retrieve it. A completed week creates an audit after at least 12 captured final games, but football parameters move only when at least 48 season-to-date snapshots show a pre-set persistent residual. V2 remains market-anchored when a paired live market probability exists.',
+    note:
+      'The canonical prediction record remains one frozen pick per game. A separate hourly prospective ledger now preserves later pre-kickoff snapshots without counting one game multiple times in learning metrics. Final scores create postmortems before that game enters memory. Expected losses are tracked so ordinary lower-probability outcomes are not mistaken for fixable model errors. V2 remains market-anchored when a paired live market probability exists.',
   };
 }
 

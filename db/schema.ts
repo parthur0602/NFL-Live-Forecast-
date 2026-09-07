@@ -44,6 +44,53 @@ export const predictionSnapshots = sqliteTable(
   ],
 );
 
+// Time-series ledger for prospective same-timestamp evaluation. Unlike
+// predictionSnapshots (the canonical one-pick-per-game learning record), this
+// table intentionally permits multiple immutable pre-kickoff forecasts for a
+// game. captureBucket prevents browser refreshes from flooding the ledger.
+export const forecastLedger = sqliteTable(
+  'forecast_ledger',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    season: integer('season').notNull(),
+    week: integer('week').notNull(),
+    gameKey: text('game_key').notNull(),
+    awayTeam: text('away_team').notNull(),
+    homeTeam: text('home_team').notNull(),
+    predictedWinner: text('predicted_winner').notNull(),
+    homeProbability: real('home_probability').notNull(),
+    marketHomeProbability: real('market_home_probability'),
+    footballHomeProbability: real('football_home_probability'),
+    expectedHomeMargin: real('expected_home_margin'),
+    marketExpectedHomeMargin: real('market_expected_home_margin'),
+    homeSpread: real('home_spread'),
+    homeCoverProbability: real('home_cover_probability'),
+    modelVersion: text('model_version'),
+    favoriteProbability: real('favorite_probability').notNull(),
+    liveDelta: real('live_delta').notNull().default(0),
+    captureBucket: text('capture_bucket').notNull(),
+    capturedAt: text('captured_at').notNull(),
+    settledAt: text('settled_at'),
+    awayScore: integer('away_score'),
+    homeScore: integer('home_score'),
+    winner: text('winner'),
+    correct: integer('correct', { mode: 'boolean' }),
+  },
+  (table) => [
+    uniqueIndex('uq_forecast_ledger_game_bucket').on(
+      table.season,
+      table.gameKey,
+      table.captureBucket,
+    ),
+    index('idx_forecast_ledger_game_time').on(
+      table.season,
+      table.gameKey,
+      table.capturedAt,
+    ),
+    index('idx_forecast_ledger_season_week').on(table.season, table.week),
+  ],
+);
+
 export const gamePostmortems = sqliteTable(
   'game_postmortems',
   {
