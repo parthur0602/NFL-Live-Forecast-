@@ -14,6 +14,7 @@
     "model:check": "node scripts/verify-model-integrity.mjs",
     "failure:atlas": "node scripts/build-failure-atlas.mjs",
     "shadow:residual": "node scripts/build-shadow-residual-backtest.mjs",
+    "residual:robustness": "node scripts/build-residual-robustness.mjs",
     "typecheck": "tsc --noEmit",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "db:generate": "drizzle-kit generate",
