@@ -13,7 +13,7 @@ export const HISTORICAL_BACKTEST = {
     2024,
     2025
   ],
-  "generatedAt": "2026-09-07T18:42:54.770Z",
+  "generatedAt": "2026-09-07T19:08:00.161Z",
   "methodology": {
     "label": "Common-feature chronological strength + venue replay",
     "homeFieldEdge": 1.1,
@@ -1396,6 +1396,37 @@ export const HISTORICAL_BACKTEST = {
       "severityScore": 53.774664295582184
     }
   ],
+  "currentBenchmark": {
+    "modelVersion": "V2.0-MARKET-ANCHOR-SHADOW",
+    "label": "Current V2 market-anchor benchmark",
+    "status": "Provisional closing-market proxy",
+    "evaluatedAt": "2026-09-07T19:08:00.161Z",
+    "scope": "2021–2025 regular season and postseason; decided games only",
+    "metrics": {
+      "games": 1420,
+      "tiesExcluded": 0,
+      "correct": 942,
+      "incorrect": 478,
+      "accuracy": 0.6633802816901408,
+      "accuracyInterval95": {
+        "low": 0.6383897662497009,
+        "high": 0.6874891798353131
+      },
+      "brier": 0.21149350424524294,
+      "logLoss": 0.6102687742050811,
+      "marginMae": 9.771830985915493,
+      "marginMedianAbsoluteError": 7.5
+    },
+    "releaseRule": "This benchmark is regenerated before every production build. A future model cannot replace it until its chronological historical replay completes.",
+    "nextEvidence": "Same-timestamp market snapshots must accumulate prospectively before a V3 football residual or betting edge can be promoted.",
+    "permanentReference": {
+      "modelVersion": "HIST-STR-1.0",
+      "accuracy": 0.6359154929577465,
+      "brier": 0.22873938170306268,
+      "logLoss": 0.656060515969002,
+      "marginMae": 10.203973943661957
+    }
+  },
   "records": [
     {
       "gameId": "2021_01_DAL_TB",

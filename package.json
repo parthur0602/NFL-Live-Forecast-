@@ -6,8 +6,11 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "prebuild": "pnpm run historical:refresh && pnpm run historical:check",
     "dev": "vinext dev",
     "build": "vinext build",
+    "historical:refresh": "node scripts/build-historical-backtest.mjs",
+    "historical:check": "node scripts/verify-historical-benchmark.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "db:generate": "drizzle-kit generate",
     "lint": "oxlint",

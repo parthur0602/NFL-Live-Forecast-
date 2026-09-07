@@ -289,6 +289,23 @@ type HistoricalBacktest = {
       };
     }>;
   };
+  currentBenchmark: {
+    modelVersion: string;
+    label: string;
+    status: string;
+    evaluatedAt: string;
+    scope: string;
+    metrics: BacktestMetric;
+    releaseRule: string;
+    nextEvidence: string;
+    permanentReference: {
+      modelVersion: string;
+      accuracy: number | null;
+      brier: number | null;
+      logLoss: number | null;
+      marginMae: number | null;
+    };
+  };
 };
 type RenderedGame = Game & {
   adjustedHome: number;
@@ -879,16 +896,15 @@ export function ForecastDesk() {
                 value={`${appliedCount} update${appliedCount === 1 ? '' : 's'}`}
               />
               <Metric
-                label="Historical"
+                label="Current benchmark"
                 value={
                   historical
-                    ? formatPercent(historical.overall.accuracy)
+                    ? formatPercent(historical.currentBenchmark.metrics.accuracy)
                     : 'Loading'
                 }
               />
             </div>
-            {historical && <HistoricalPerformance historical={historical} />}
-            {historical && <ModelV2Lab historical={historical} />}
+            {historical && <CurrentBenchmarkPanel historical={historical} />}
             {historicalError && <Notice tone="warn" text={historicalError} />}
             {learning && <LearningPanel learning={learning} />}
             {forecast && <BettingBoard games={renderedGames} market={market} />}
@@ -1342,6 +1358,101 @@ function BettingBoard({
           </div>
         </>
       )}
+    </section>
+  );
+}
+function CurrentBenchmarkPanel({
+  historical,
+}: {
+  historical: HistoricalBacktest;
+}) {
+  const benchmark = historical.currentBenchmark;
+  const metrics = benchmark.metrics;
+  return (
+    <section className="mb-5 overflow-hidden rounded-2xl border border-[#e9b949]/30 bg-[#102638]/95 shadow-xl shadow-black/10">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-sky-100/10 px-5 py-4">
+        <div className="flex gap-3">
+          <div className="grid size-9 place-items-center rounded-xl bg-[#e9b949]/15 text-[#f6d787]">
+            <Target className="size-5" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[.16em] text-[#e9b949]">
+              Current model benchmark
+            </p>
+            <h3 className="mt-0.5 font-bold text-white">{benchmark.label}</h3>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
+              {benchmark.scope}. Updated {asDate(benchmark.evaluatedAt)}.
+            </p>
+          </div>
+        </div>
+        <span className="rounded-full border border-[#e9b949]/30 bg-[#e9b949]/10 px-3 py-1.5 text-xs font-semibold text-[#f6d787]">
+          {benchmark.status}
+        </span>
+      </div>
+
+      <div className="grid divide-y divide-sky-100/10 border-b border-sky-100/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+        <HistoricalMetric
+          label="Winner accuracy"
+          value={formatPercent(metrics.accuracy)}
+          detail={`${metrics.correct} correct · ${metrics.incorrect} incorrect`}
+        />
+        <HistoricalMetric
+          label="Brier score"
+          value={formatMetric(metrics.brier)}
+          detail="Probability quality · lower is better"
+        />
+        <HistoricalMetric
+          label="Log loss"
+          value={formatMetric(metrics.logLoss)}
+          detail="Confidence penalty · lower is better"
+        />
+        <HistoricalMetric
+          label="Margin MAE"
+          value={`${formatMetric(metrics.marginMae, 1)} pts`}
+          detail="Expected margin error · lower is better"
+        />
+      </div>
+
+      <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+            Required historical release check
+          </p>
+          <p className="mt-2 text-sm leading-6 text-slate-200">
+            {benchmark.releaseRule}
+          </p>
+          <p className="mt-2 text-xs leading-5 text-slate-400">
+            {benchmark.nextEvidence}
+          </p>
+        </div>
+        <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+            Accuracy status
+          </p>
+          <p className="mt-2 text-sm font-semibold text-white">
+            {metrics.games.toLocaleString()} graded games
+          </p>
+          <p className="mt-1 text-xs leading-5 text-slate-400">
+            {metrics.tiesExcluded} ties excluded from binary winner scoring.
+          </p>
+        </div>
+      </div>
+
+      <details className="border-t border-sky-100/10 bg-[#071a28]/30 px-5 py-4 text-sm">
+        <summary className="cursor-pointer font-semibold text-sky-200">
+          Benchmark context and permanent V1 reference
+        </summary>
+        <div className="mt-3 grid gap-3 text-xs leading-5 text-slate-300 sm:grid-cols-2">
+          <p>
+            This is the only historical score shown on the dashboard. It is a
+            closing-market diagnostic, so it does not claim same-timestamp V3
+            validation.
+          </p>
+          <p>
+            V1 remains archived as the permanent baseline: {formatPercent(benchmark.permanentReference.accuracy)} accuracy · Brier {formatMetric(benchmark.permanentReference.brier)} · Log loss {formatMetric(benchmark.permanentReference.logLoss)} · Margin MAE {formatMetric(benchmark.permanentReference.marginMae, 1)} pts.
+          </p>
+        </div>
+      </details>
     </section>
   );
 }
