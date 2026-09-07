@@ -1,5 +1,12 @@
 import { NextResponse } from 'next/server';
-import { decodeAttribute, learnedProbability, SCHEDULE_BASE_URL, TEAM_ALIASES, TEAM_RATINGS, toDisplayDate } from '@/lib/forecast';
+import {
+  decodeAttribute,
+  learnedProbability,
+  SCHEDULE_BASE_URL,
+  TEAM_ALIASES,
+  TEAM_RATINGS,
+  toDisplayDate,
+} from '@/lib/forecast';
 import { safeModelState } from '@/lib/learning';
 
 type ScheduleGame = {
@@ -13,7 +20,12 @@ type ScheduleGame = {
   source: string;
 };
 
-function parseWeek(html: string, week: number, source: string, learned: Awaited<ReturnType<typeof safeModelState>>): ScheduleGame[] {
+function parseWeek(
+  html: string,
+  week: number,
+  source: string,
+  learned: Awaited<ReturnType<typeof safeModelState>>,
+): ScheduleGame[] {
   const unique = new Map<string, ScheduleGame>();
   for (const match of html.matchAll(/data-analytics="([^"]+)"/g)) {
     try {
@@ -24,24 +36,36 @@ function parseWeek(html: string, week: number, source: string, learned: Awaited<
       const away = TEAM_ALIASES[matchup[1]];
       const home = TEAM_ALIASES[matchup[2]];
       if (!away || !home) continue;
-      const neutral = week === 1 && away === 'San Francisco 49ers' && home === 'Los Angeles Rams';
+      const neutral =
+        week === 1 &&
+        away === 'San Francisco 49ers' &&
+        home === 'Los Angeles Rams';
       const game = {
-        id: String(item.gameId), week, away, home, neutral,
+        id: String(item.gameId),
+        week,
+        away,
+        home,
+        neutral,
         date: toDisplayDate(item.linkName),
-        homeProbability: learnedProbability(home, away, neutral, {}, learned), source,
+        homeProbability: learnedProbability(home, away, neutral, {}, learned),
+        source,
       };
       unique.set(`${away}:${home}`, game);
     } catch {
       // Non-game analytics are intentionally ignored.
     }
   }
-  return [...unique.values()].sort((a, b) => a.date.localeCompare(b.date) || a.away.localeCompare(b.away));
+  return [...unique.values()].sort(
+    (a, b) => a.date.localeCompare(b.date) || a.away.localeCompare(b.away),
+  );
 }
 
 export async function GET(request: Request) {
   const rawWeek = new URL(request.url).searchParams.get('week');
   const requested = Number.parseInt(rawWeek ?? '1', 10);
-  const week = Number.isFinite(requested) ? Math.min(18, Math.max(1, requested)) : 1;
+  const week = Number.isFinite(requested)
+    ? Math.min(18, Math.max(1, requested))
+    : 1;
   const source = `${SCHEDULE_BASE_URL}/week-${week}`;
 
   try {
@@ -50,24 +74,40 @@ export async function GET(request: Request) {
       headers: { 'user-agent': 'NFL Forecast Desk / schedule reader' },
       cache: 'no-store',
     });
-    if (!response.ok) throw new Error(`NFL schedule returned ${response.status}`);
+    if (!response.ok)
+      throw new Error(`NFL schedule returned ${response.status}`);
     const games = parseWeek(await response.text(), week, source, learned);
-    if (!games.length) throw new Error('No game cards were found on the official schedule page.');
+    if (!games.length)
+      throw new Error(
+        'No game cards were found on the official schedule page.',
+      );
 
-    return NextResponse.json({
-      week, games, retrievedAt: new Date().toISOString(), source,
-      model: {
-        label: 'Market-strength baseline + venue edge',
-        ratings: TEAM_RATINGS,
-        learning: learned,
-        notes: 'Baseline strength is a preseason prior derived from published 2026 win totals. Completed weekly audits make only capped calibration changes; the live layer is then applied in the browser after verified updates arrive.',
+    return NextResponse.json(
+      {
+        week,
+        games,
+        retrievedAt: new Date().toISOString(),
+        source,
+        model: {
+          label: 'Football-only strength prior + venue edge',
+          ratings: TEAM_RATINGS,
+          learning: learned,
+          notes:
+            'This football forecast does not ingest game betting lines. Baseline strength is a preseason prior derived from published 2026 win totals; completed weekly audits make only capped calibration changes before verified live inputs are applied.',
+        },
       },
-    }, { headers: { 'cache-control': 'no-store, max-age=0' } });
+      { headers: { 'cache-control': 'no-store, max-age=0' } },
+    );
   } catch (error) {
-    return NextResponse.json({
-      error: 'The official NFL schedule could not be refreshed right now. No stale schedule is substituted.',
-      detail: error instanceof Error ? error.message : 'Unknown schedule error',
-      source,
-    }, { status: 502, headers: { 'cache-control': 'no-store, max-age=0' } });
+    return NextResponse.json(
+      {
+        error:
+          'The official NFL schedule could not be refreshed right now. No stale schedule is substituted.',
+        detail:
+          error instanceof Error ? error.message : 'Unknown schedule error',
+        source,
+      },
+      { status: 502, headers: { 'cache-control': 'no-store, max-age=0' } },
+    );
   }
 }
