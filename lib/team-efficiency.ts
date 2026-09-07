@@ -21,6 +21,23 @@ type EfficiencySnapshot = {
   payload: Record<string, unknown>;
 };
 
+function emptyRefresh(
+  forecastWeek: number,
+  observedAt: string,
+  reason: string,
+) {
+  return {
+    season: SEASON,
+    forecastWeek,
+    observedAt,
+    source: SOURCE_URL,
+    sourceAvailable: false,
+    teams: [] as EfficiencySnapshot[],
+    productionInfluence: 0,
+    note: reason,
+  };
+}
+
 function db() {
   const binding = (env as unknown as DatabaseEnv).DB;
   if (!binding) throw new Error('Team-efficiency database binding is unavailable.');
@@ -155,12 +172,33 @@ function snapshotFor(team: string, rows: CsvRow[]): EfficiencySnapshot {
 export async function refreshTeamEfficiency(forecastWeek: number) {
   if (!Number.isInteger(forecastWeek) || forecastWeek < 1 || forecastWeek > 22)
     throw new Error('Invalid forecast week.');
+  const observedAt = new Date().toISOString();
+  if (forecastWeek === 1) {
+    return emptyRefresh(
+      forecastWeek,
+      observedAt,
+      'Week 1 has no completed regular-season games available for a prior-game sample.',
+    );
+  }
   const response = await fetch(SOURCE_URL, { cache: 'no-store' });
+  if (response.status === 404) {
+    return emptyRefresh(
+      forecastWeek,
+      observedAt,
+      'The current-season nflverse team-stat file is not published yet; no historical substitute was used.',
+    );
+  }
   if (!response.ok) throw new Error(`nflverse team stats returned ${response.status}.`);
   const rows = parseCsv(await response.text()).filter((row) => {
     const season = numberFrom(row, 'season');
     const week = numberFrom(row, 'week');
-    return season === SEASON && week !== null && week < forecastWeek && teamName(row);
+    return (
+      season === SEASON &&
+      row.season_type === 'REG' &&
+      week !== null &&
+      week < forecastWeek &&
+      teamName(row)
+    );
   });
   const grouped = new Map<string, CsvRow[]>();
   for (const row of rows) {
@@ -168,7 +206,6 @@ export async function refreshTeamEfficiency(forecastWeek: number) {
     grouped.set(team, [...(grouped.get(team) ?? []), row]);
   }
   const snapshots = [...grouped.entries()].map(([team, teamRows]) => snapshotFor(team, teamRows));
-  const observedAt = new Date().toISOString();
   const database = db();
   const statements = snapshots.map((snapshot) => database.prepare(
     `INSERT OR IGNORE INTO team_efficiency_snapshots (season, week, team, source, source_url, observed_at, capture_bucket, games_in_sample, passing_epa, rushing_epa, receiving_epa, passing_success_rate, rushing_success_rate, completion_percentage, yards_per_attempt, sack_rate, turnover_rate, payload_json, eligible_for_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
@@ -198,6 +235,7 @@ export async function refreshTeamEfficiency(forecastWeek: number) {
     forecastWeek,
     observedAt,
     source: SOURCE_URL,
+    sourceAvailable: true,
     teams: snapshots,
     productionInfluence: 0,
     note: 'These features are timestamp-safe inputs for shadow specialists only. V2 remains unchanged until prospective same-time validation proves incremental value.',
