@@ -208,6 +208,20 @@ function expectedMarginFor(
   const away = (ratings[game.away] ?? 0) + (adjustments[game.away] ?? 0);
   return home - away + (game.neutral ? 0 : 1.1 + learning.homeFieldAdjustment);
 }
+function spreadSelectionFor(game: RenderedGame) {
+  const line = game.market;
+  if (!line || line.homeSpread === null || line.homeSpread === undefined) {
+    return 'No spread line';
+  }
+  const spreadEdge = game.expectedMargin + line.homeSpread;
+  if (spreadEdge >= 0.25) {
+    return `${game.home} ${formatPrice(line.homeSpread, line.homeSpreadOdds)}`;
+  }
+  if (spreadEdge <= -0.25) {
+    return `${game.away} ${formatPrice(line.awaySpread, line.awaySpreadOdds)}`;
+  }
+  return 'Pass — no clear spread edge';
+}
 
 export function ForecastDesk() {
   const [week, setWeek] = useState(1);
@@ -677,13 +691,23 @@ export function ForecastDesk() {
                           Official schedule
                         </span>
                         {game.market && (
-                          <span className="text-slate-400">
-                            Market:{' '}
-                            {game.market.homeSpread === null
-                              ? 'ML only'
-                              : `${game.home} ${formatSigned(game.market.homeSpread)}`}{' '}
-                            · O/U {formatLine(game.market.totalLine)}
-                          </span>
+                          <>
+                            <span className="text-slate-400">
+                              Market:{' '}
+                              {game.market.homeSpread === null
+                                ? 'ML only'
+                                : `${game.home} ${formatSigned(game.market.homeSpread)}`}{' '}
+                              · O/U {formatLine(game.market.totalLine)}
+                            </span>
+                            <span className="inline-flex items-center gap-1.5 rounded-full border border-[#e9b949]/35 bg-[#e9b949]/10 px-2.5 py-1 font-semibold text-[#f6d787]">
+                              <Radio className="size-3 text-[#e9b949]" />
+                              Live spread:{' '}
+                              {formatPrice(
+                                game.market.homeSpread,
+                                game.market.homeSpreadOdds,
+                              )}
+                            </span>
+                          </>
                         )}
                       </div>
                     </div>
@@ -711,6 +735,25 @@ export function ForecastDesk() {
                         <p className="mt-0.5 text-sm font-medium text-[#f6d787]">
                           {(favoriteProbability * 100).toFixed(1)}% win
                         </p>
+                        {game.market && (
+                          <div className="mt-3 border-t border-[#e9b949]/20 pt-2 text-left sm:text-right">
+                            <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[#e9b949]">
+                              Live spread
+                            </p>
+                            <p className="mt-0.5 text-xs font-semibold text-white">
+                              {formatPrice(
+                                game.market.homeSpread,
+                                game.market.homeSpreadOdds,
+                              )}{' '}
+                              <span className="font-normal text-slate-400">
+                                home
+                              </span>
+                            </p>
+                            <p className="mt-1 text-[11px] leading-4 text-[#f6d787]">
+                              Selection: {spreadSelectionFor(game)}
+                            </p>
+                          </div>
+                        )}
                         <p className="mt-2 text-[11px] leading-4 text-slate-400">
                           {newsMove
                             ? `Live inputs moved home win ${game.delta > 0 ? 'up' : 'down'} ${Math.abs(game.delta * 100).toFixed(1)} pts`
