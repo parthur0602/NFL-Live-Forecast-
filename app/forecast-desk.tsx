@@ -25,6 +25,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  americanFairOdds,
+  homeCoverProbability,
+  impliedProbability,
+  MODEL_V2,
+  v2ExpectedHomeMargin,
+  v2HomeProbability,
+} from '@/lib/model-v2';
 
 type Game = {
   id: string;
@@ -193,9 +201,99 @@ type HistoricalBacktest = {
     expectedHomeMargin: number;
     actualHomeMargin: number;
   }>;
+  dataCompleteness: Array<{
+    season: number;
+    scheduledGames: number;
+    completedGames: number;
+    decidedGames: number;
+    ties: number;
+    canceledGames: number;
+    gamesWithMoneyline: number;
+    gamesWithClosingSpread: number;
+    gamesWithTimestampMatchedOdds: number;
+  }>;
+  marketBenchmark: {
+    label: string;
+    source: { label: string; url: string };
+    caveat: string;
+    overall: BacktestMetric;
+    pairedV1: BacktestMetric;
+    difference: {
+      gamesPaired: number;
+      accuracy: number | null;
+      brier: number | null;
+      logLoss: number | null;
+      marginMae: number | null;
+    };
+    bootstrapDifference95: Record<
+      string,
+      { low: number | null; high: number | null }
+    > | null;
+    bySeason: Array<{
+      season: number;
+      modelV1: BacktestMetric;
+      closingMarket: BacktestMetric;
+      difference: {
+        accuracy: number | null;
+        brier: number | null;
+        logLoss: number | null;
+        marginMae: number | null;
+      };
+    }>;
+  };
+  v2: {
+    modelVersion: string;
+    status: string;
+    architecture: string;
+    selectedWeights: Array<{
+      season: number;
+      footballCorrectionWeight: number;
+      trainingGames: number;
+    }>;
+    development: BacktestMetric;
+    holdout: BacktestMetric;
+    allFiveSeasons: BacktestMetric;
+    currentFootballCorrectionWeight: number;
+    promotion: string;
+  };
+  spread: {
+    scope: string;
+    gamesWithClosingSpread: number;
+    atsDecisions: number;
+    correct: number;
+    incorrect: number;
+    pushes: number;
+    accuracy: number | null;
+    coverBrier: number | null;
+    coverLogLoss: number | null;
+    calibration: Array<{
+      label: string;
+      games: number;
+      predicted: number;
+      actual: number;
+      brier: number;
+    }>;
+    keyNumbers: Array<{ keyNumber: number; games: number; accuracy: number | null }>;
+    verdict: string;
+  };
+  marketDisagreement: {
+    groups: Array<{
+      label: string;
+      model: BacktestMetric;
+      market: BacktestMetric;
+      difference: {
+        accuracy: number | null;
+        brier: number | null;
+        logLoss: number | null;
+        marginMae: number | null;
+      };
+    }>;
+  };
 };
 type RenderedGame = Game & {
   adjustedHome: number;
+  footballHome: number;
+  footballExpectedMargin: number;
   delta: number;
   expectedMargin: number;
   market: MarketLine | null;
@@ -281,14 +379,19 @@ function spreadSelectionFor(game: RenderedGame) {
   if (!line || line.homeSpread === null || line.homeSpread === undefined) {
     return 'No spread line';
   }
-  const spreadEdge = game.expectedMargin + line.homeSpread;
-  if (spreadEdge >= 0.25) {
-    return `${game.home} ${formatPrice(line.homeSpread, line.homeSpreadOdds)}`;
-  }
-  if (spreadEdge <= -0.25) {
-    return `${game.away} ${formatPrice(line.awaySpread, line.awaySpreadOdds)}`;
-  }
-  return 'Pass — no clear spread edge';
+  const homeCover = homeCoverProbability(game.expectedMargin, line.homeSpread);
+  if (homeCover === null) return 'No cover projection';
+  const chooseHome = homeCover >= 0.5;
+  const probability = chooseHome ? homeCover : 1 - homeCover;
+  const price = impliedProbability(
+    chooseHome ? line.homeSpreadOdds : line.awaySpreadOdds,
+  );
+  if (price === null || probability <= price)
+    return 'Pass — no price edge';
+  return `${chooseHome ? game.home : game.away} ${formatPrice(
+    chooseHome ? line.homeSpread : line.awaySpread,
+    chooseHome ? line.homeSpreadOdds : line.awaySpreadOdds,
+  )}`;
 }
 
 export function ForecastDesk() {
@@ -587,7 +690,7 @@ export function ForecastDesk() {
   const renderedGames = useMemo(
     () =>
       (forecast?.games ?? []).map((game) => {
-        const adjustedHome = probabilityFor(
+        const footballHome = probabilityFor(
           game,
           forecast?.model.ratings ?? {},
           live?.adjustments ?? {},
@@ -597,24 +700,35 @@ export function ForecastDesk() {
             confidenceShrinkage: 0,
           },
         );
+        const footballExpectedMargin = expectedMarginFor(
+          game,
+          forecast?.model.ratings ?? {},
+          live?.adjustments ?? {},
+          forecast?.model.learning ?? {
+            completedWeeks: 0,
+            homeFieldAdjustment: 0,
+            confidenceShrinkage: 0,
+          },
+        );
+        const matchedMarket =
+          market?.lines.find(
+            (line) => line.gameKey === `${game.away}__${game.home}`,
+          ) ?? null;
+        const adjustedHome = v2HomeProbability(
+          footballHome,
+          matchedMarket?.homeImpliedProbability ?? null,
+        );
         return {
           ...game,
           adjustedHome,
-          delta: adjustedHome - game.homeProbability,
-          expectedMargin: expectedMarginFor(
-            game,
-            forecast?.model.ratings ?? {},
-            live?.adjustments ?? {},
-            forecast?.model.learning ?? {
-              completedWeeks: 0,
-              homeFieldAdjustment: 0,
-              confidenceShrinkage: 0,
-            },
+          footballHome,
+          footballExpectedMargin,
+          delta: footballHome - game.homeProbability,
+          expectedMargin: v2ExpectedHomeMargin(
+            footballExpectedMargin,
+            matchedMarket?.homeSpread ?? null,
           ),
-          market:
-            market?.lines.find(
-              (line) => line.gameKey === `${game.away}__${game.home}`,
-            ) ?? null,
+          market: matchedMarket,
         };
       }),
     [forecast, live, market],
@@ -702,9 +816,9 @@ export function ForecastDesk() {
                   Every matchup. One clear call.
                 </h2>
                 <p className="mt-1.5 max-w-xl text-sm leading-6 text-slate-300">
-                  Win probability starts with a transparent team-strength and
-                  venue model, then shifts only when a live report passes the
-                  update rule.
+                  V2 uses the live no-vig market as its forecast prior when a
+                  paired line is available. The football model remains visible
+                  as a transparent fallback and diagnostic layer.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -774,6 +888,7 @@ export function ForecastDesk() {
               />
             </div>
             {historical && <HistoricalPerformance historical={historical} />}
+            {historical && <ModelV2Lab historical={historical} />}
             {historicalError && <Notice tone="warn" text={historicalError} />}
             {learning && <LearningPanel learning={learning} />}
             {forecast && <BettingBoard games={renderedGames} market={market} />}
@@ -852,7 +967,7 @@ export function ForecastDesk() {
                       </div>
                       <div className="rounded-xl border border-[#e9b949]/25 bg-[#e9b949]/8 p-3.5 sm:text-right">
                         <p className="text-[10px] font-bold uppercase tracking-[.16em] text-[#e9b949]">
-                          Model pick
+                          V2 forecast
                         </p>
                         <p className="mt-1 text-base font-bold text-white">
                           {favorite}
@@ -880,9 +995,11 @@ export function ForecastDesk() {
                           </div>
                         )}
                         <p className="mt-2 text-[11px] leading-4 text-slate-400">
-                          {newsMove
-                            ? `Live inputs moved home win ${game.delta > 0 ? 'up' : 'down'} ${Math.abs(game.delta * 100).toFixed(1)} pts`
-                            : 'No applied live adjustment'}
+                          {game.market
+                            ? `Market-anchored · football read ${(game.footballHome * 100).toFixed(1)}% ${game.home}`
+                            : newsMove
+                              ? `Football fallback moved home win ${game.delta > 0 ? 'up' : 'down'} ${Math.abs(game.delta * 100).toFixed(1)} pts`
+                              : 'Football fallback · no applied live adjustment'}
                         </p>
                       </div>
                     </div>
@@ -1057,12 +1174,12 @@ function BettingBoard({
             Betting-market comparison
           </p>
           <h3 className="mt-0.5 font-bold text-white">
-            Lines, probabilities, and a clean separation from the model.
+            Current lines, fair probabilities, and price-aware passes.
           </h3>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-400">
-            The football forecast remains independent. The board is a
-            timestamped research comparison, not an automated betting
-            recommendation.
+            V2 uses the current no-vig market as its prior. A side is only
+            surfaced when its probability clears the displayed price; the
+            historical validation gate currently keeps most games as passes.
           </p>
         </div>
         {market && (
@@ -1092,30 +1209,34 @@ function BettingBoard({
             {games.map((game) => {
               const line = game.market;
               const marketHome = line?.homeImpliedProbability ?? null;
-              const difference =
-                marketHome === null ? null : game.adjustedHome - marketHome;
+              const footballDifference =
+                marketHome === null ? null : game.footballHome - marketHome;
               const label =
-                difference === null
+                footballDifference === null
                   ? 'No paired moneyline'
-                  : Math.abs(difference) < 0.03
-                    ? 'No material separation'
-                    : 'Review disagreement';
+                  : Math.abs(footballDifference) < 0.03
+                    ? 'Football model aligns'
+                    : 'Football read differs';
               const spreadEdge =
                 line?.homeSpread === null || line?.homeSpread === undefined
                   ? null
-                  : game.expectedMargin + line.homeSpread;
-              const spreadSelection =
-                spreadEdge === null
-                  ? 'No spread line'
-                  : spreadEdge >= 0.25
-                    ? `${game.home} ${formatPrice(line.homeSpread, line.homeSpreadOdds)}`
-                    : spreadEdge <= -0.25
-                      ? `${game.away} ${formatPrice(line.awaySpread, line.awaySpreadOdds)}`
-                      : 'Pass — no clear spread edge';
+                  : game.footballExpectedMargin + line.homeSpread;
+              const spreadSelection = spreadSelectionFor(game);
+              const chooseHome = game.adjustedHome >= 0.5;
+              const moneylineProbability = chooseHome
+                ? game.adjustedHome
+                : 1 - game.adjustedHome;
+              const moneylinePrice = impliedProbability(
+                chooseHome ? line?.homeMoneyline ?? null : line?.awayMoneyline ?? null,
+              );
               const moneylineSelection =
-                game.adjustedHome >= 0.5
-                  ? `${game.home} ${formatOdds(line?.homeMoneyline ?? null)}`
-                  : `${game.away} ${formatOdds(line?.awayMoneyline ?? null)}`;
+                moneylinePrice !== null && moneylineProbability > moneylinePrice
+                  ? `${chooseHome ? game.home : game.away} ${formatOdds(chooseHome ? line?.homeMoneyline ?? null : line?.awayMoneyline ?? null)}`
+                  : 'Pass — no price edge';
+              const homeCover = homeCoverProbability(
+                game.expectedMargin,
+                line?.homeSpread ?? null,
+              );
               return (
                 <div key={`market-${game.id}`} className="space-y-3 px-5 py-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1166,23 +1287,21 @@ function BettingBoard({
                     </div>
                     <div className="grid grid-cols-2 gap-2 rounded-lg border border-sky-100/10 bg-[#071a28]/60 px-3 py-2.5">
                       <div>
-                        <p className="text-slate-500">Football model</p>
+                        <p className="text-slate-500">V2 fair forecast</p>
                         <p className="mt-0.5 font-semibold text-white">
                           {(game.adjustedHome * 100).toFixed(1)}% {game.home}
                         </p>
                         <p className="mt-1 text-slate-400">
-                          Margin proxy {formatSigned(game.expectedMargin)}
+                          Fair ML {formatOdds(americanFairOdds(game.adjustedHome))} · margin {formatSigned(game.expectedMargin)}
                         </p>
                       </div>
                       <div>
-                        <p className="text-slate-500">Vig-free market</p>
+                        <p className="text-slate-500">Football diagnostic</p>
                         <p className="mt-0.5 font-semibold text-white">
-                          {marketHome === null
-                            ? '—'
-                            : `${(marketHome * 100).toFixed(1)}% ${game.home}`}
+                          {(game.footballHome * 100).toFixed(1)}% {game.home}
                         </p>
                         <p className="mt-1 text-slate-400">
-                          {market?.source.label}
+                          Margin {formatSigned(game.footballExpectedMargin)}
                         </p>
                       </div>
                     </div>
@@ -1194,16 +1313,19 @@ function BettingBoard({
                         {label}
                       </p>
                       <p className="mt-1 text-[11px] text-slate-400">
-                        ML{' '}
-                        {difference === null
+                        Football ML{' '}
+                        {footballDifference === null
                           ? 'track only'
-                          : `${difference > 0 ? '+' : ''}${(difference * 100).toFixed(1)} pts to home`}
+                          : `${footballDifference > 0 ? '+' : ''}${(footballDifference * 100).toFixed(1)} pts to home`}
                       </p>
                       <p className="mt-1 text-[11px] text-slate-400">
-                        Spread edge{' '}
+                        Football margin{' '}
                         {spreadEdge === null
                           ? '—'
                           : `${spreadEdge > 0 ? '+' : ''}${spreadEdge.toFixed(1)} pts`}
+                      </p>
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        V2 home cover {formatPercent(homeCover)}
                       </p>
                     </div>
                   </div>
@@ -1213,13 +1335,210 @@ function BettingBoard({
           </div>
           <div className="border-t border-sky-100/10 px-5 py-3 text-xs leading-5 text-slate-400">
             {market.note} Every refresh is retained as an immutable market
-            snapshot. The spread selection is a transparent strength-margin
-            proxy; it is not presented as a validated cover probability. Totals
-            remain informational until a separate, out-of-sample-tested total
-            model is available.
+            snapshot. The V2 market anchor does not turn a predicted winner into
+            a bet: it compares fair probability with the actual displayed price.
+            Spread cover probabilities remain shadow estimates until the desk has
+            timestamp-matched historical line archives. Totals remain informational.
           </div>
         </>
       )}
+    </section>
+  );
+}
+function ModelV2Lab({ historical }: { historical: HistoricalBacktest }) {
+  const benchmark = historical.marketBenchmark;
+  const disagreement = historical.marketDisagreement.groups.find(
+    (group) => group.label === 'Picks market underdog',
+  );
+  const bootstrapBrier = benchmark.bootstrapDifference95?.brier;
+  const bootstrapAccuracy = benchmark.bootstrapDifference95?.accuracy;
+  const v2Weight = historical.v2.currentFootballCorrectionWeight;
+  return (
+    <section className="mb-5 overflow-hidden rounded-2xl border border-emerald-300/20 bg-[#09283a]/95 shadow-xl shadow-black/10">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-sky-100/10 px-5 py-4">
+        <div className="flex gap-3">
+          <div className="grid size-9 place-items-center rounded-xl bg-emerald-300/12 text-emerald-200">
+            <BrainCircuit className="size-5" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[.16em] text-emerald-200">
+              Model V2 performance lab
+            </p>
+            <h3 className="mt-0.5 font-bold text-white">
+              Market-first by evidence, not by assumption.
+            </h3>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
+              {historical.v2.promotion}
+            </p>
+          </div>
+        </div>
+        <span className="rounded-full border border-[#e9b949]/30 bg-[#e9b949]/10 px-3 py-1.5 text-xs font-semibold text-[#f6d787]">
+          {historical.v2.status}
+        </span>
+      </div>
+
+      <div className="grid divide-y divide-sky-100/10 border-b border-sky-100/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+        <HistoricalMetric
+          label="V1 Brier"
+          value={formatMetric(benchmark.pairedV1.brier)}
+          detail="Same games · lower is better"
+        />
+        <HistoricalMetric
+          label="Closing market Brier"
+          value={formatMetric(benchmark.overall.brier)}
+          detail={`${formatMetric(benchmark.difference.brier)} V1 minus market`}
+        />
+        <HistoricalMetric
+          label="V1 accuracy"
+          value={formatPercent(benchmark.pairedV1.accuracy)}
+          detail={`${formatPercent(benchmark.difference.accuracy)} vs market`}
+        />
+        <HistoricalMetric
+          label="V2 football correction"
+          value={formatPercent(v2Weight)}
+          detail="0% selected in each prior-season fold"
+        />
+      </div>
+
+      <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(260px,0.8fr)]">
+        <div className="overflow-x-auto rounded-xl border border-sky-100/10">
+          <table className="w-full min-w-[700px] text-left text-sm">
+            <caption className="border-b border-sky-100/10 bg-[#071a28]/65 px-4 py-3 text-left text-xs font-bold uppercase tracking-[.13em] text-slate-400">
+              V1 versus closing-market diagnostic
+            </caption>
+            <thead className="bg-[#071a28]/40 text-xs uppercase tracking-[.1em] text-slate-500">
+              <tr>
+                <th className="px-4 py-3 font-semibold">Season</th>
+                <th className="px-4 py-3 font-semibold">V1 accuracy</th>
+                <th className="px-4 py-3 font-semibold">Market accuracy</th>
+                <th className="px-4 py-3 font-semibold">V1 Brier</th>
+                <th className="px-4 py-3 font-semibold">Market Brier</th>
+                <th className="px-4 py-3 font-semibold">V1 / market MAE</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-sky-100/8 text-slate-200">
+              {benchmark.bySeason.map((season) => (
+                <tr key={season.season} className="bg-[#0b2030]/50">
+                  <td className="px-4 py-3 font-semibold text-white">
+                    {season.season}{' '}
+                    {season.season === 2025 && (
+                      <span className="ml-1 rounded-full bg-[#e9b949]/12 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#f6d787]">
+                        Holdout
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">{formatPercent(season.modelV1.accuracy)}</td>
+                  <td className="px-4 py-3 text-emerald-100">{formatPercent(season.closingMarket.accuracy)}</td>
+                  <td className="px-4 py-3">{formatMetric(season.modelV1.brier)}</td>
+                  <td className="px-4 py-3 text-emerald-100">{formatMetric(season.closingMarket.brier)}</td>
+                  <td className="px-4 py-3">
+                    {formatMetric(season.modelV1.marginMae, 1)} / {formatMetric(season.closingMarket.marginMae, 1)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="space-y-3">
+          <div className="rounded-xl border border-[#e9b949]/25 bg-[#e9b949]/[.06] p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-[#f6d787]">
+              Interpretation guardrail
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              {benchmark.caveat}
+            </p>
+          </div>
+          <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+              2024 spike check
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              V1 reached{' '}
+              {formatPercent(benchmark.bySeason.find((season) => season.season === 2024)?.modelV1.accuracy ?? null)},
+              but the closing market reached{' '}
+              {formatPercent(benchmark.bySeason.find((season) => season.season === 2024)?.closingMarket.accuracy ?? null)}.
+              The spike is not treated as proof of unique model information.
+            </p>
+          </div>
+          <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+              Paired uncertainty
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              Bootstrap 95% interval for V1 minus market: accuracy{' '}
+              {bootstrapAccuracy ? `${formatPercent(bootstrapAccuracy.low)} to ${formatPercent(bootstrapAccuracy.high)}` : '—'}; Brier{' '}
+              {bootstrapBrier ? `${formatMetric(bootstrapBrier.low)} to ${formatMetric(bootstrapBrier.high)}` : '—'}.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 border-t border-sky-100/10 bg-[#071a28]/35 p-5 lg:grid-cols-2">
+        <div className="rounded-xl border border-sky-100/10 bg-[#0b2030]/60 p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+            When V1 disagreed with market
+          </p>
+          {disagreement ? (
+            <p className="mt-2 text-sm leading-6 text-slate-200">
+              On {disagreement.model.games} games where V1 chose the market underdog, V1 was right{' '}
+              {formatPercent(disagreement.model.accuracy)} versus the market&apos;s{' '}
+              {formatPercent(disagreement.market.accuracy)}. V2 does not override in this group.
+            </p>
+          ) : (
+            <p className="mt-2 text-sm text-slate-400">Paired disagreement data is unavailable.</p>
+          )}
+        </div>
+        <div className="rounded-xl border border-sky-100/10 bg-[#0b2030]/60 p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+            Spread validation gate
+          </p>
+          <p className="mt-2 text-sm leading-6 text-slate-200">
+            The V1 proxy was {historical.spread.correct}–{historical.spread.incorrect} with {historical.spread.pushes} pushes ({formatPercent(historical.spread.accuracy)}) and a {formatMetric(historical.spread.coverBrier)} cover Brier. {historical.spread.verdict}
+          </p>
+        </div>
+      </div>
+
+      <details className="border-t border-sky-100/10 px-5 py-4 text-sm">
+        <summary className="cursor-pointer font-semibold text-sky-200">
+          Open diagnostic details, calibration, and data audit
+        </summary>
+        <div className="mt-4 grid gap-4 xl:grid-cols-3">
+          <div className="overflow-x-auto rounded-xl border border-sky-100/10">
+            <table className="w-full min-w-[360px] text-left text-xs">
+              <caption className="border-b border-sky-100/10 bg-[#071a28]/65 px-3 py-2 text-left font-bold uppercase tracking-[.12em] text-slate-400">
+                Spread calibration proxy
+              </caption>
+              <thead className="text-slate-500"><tr><th className="px-3 py-2">Bucket</th><th className="px-3 py-2">N</th><th className="px-3 py-2">Forecast</th><th className="px-3 py-2">Actual</th></tr></thead>
+              <tbody className="divide-y divide-sky-100/8 text-slate-200">
+                {historical.spread.calibration.map((bucket) => <tr key={bucket.label}><td className="px-3 py-2">{bucket.label}</td><td className="px-3 py-2">{bucket.games}</td><td className="px-3 py-2">{formatPercent(bucket.predicted)}</td><td className="px-3 py-2">{formatPercent(bucket.actual)}</td></tr>)}
+              </tbody>
+            </table>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-sky-100/10">
+            <table className="w-full min-w-[300px] text-left text-xs">
+              <caption className="border-b border-sky-100/10 bg-[#071a28]/65 px-3 py-2 text-left font-bold uppercase tracking-[.12em] text-slate-400">
+                Key-number proxy
+              </caption>
+              <thead className="text-slate-500"><tr><th className="px-3 py-2">Spread</th><th className="px-3 py-2">N</th><th className="px-3 py-2">Correct</th></tr></thead>
+              <tbody className="divide-y divide-sky-100/8 text-slate-200">
+                {historical.spread.keyNumbers.map((bucket) => <tr key={bucket.keyNumber}><td className="px-3 py-2">{bucket.keyNumber}</td><td className="px-3 py-2">{bucket.games}</td><td className="px-3 py-2">{formatPercent(bucket.accuracy)}</td></tr>)}
+              </tbody>
+            </table>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-sky-100/10">
+            <table className="w-full min-w-[390px] text-left text-xs">
+              <caption className="border-b border-sky-100/10 bg-[#071a28]/65 px-3 py-2 text-left font-bold uppercase tracking-[.12em] text-slate-400">
+                Data completeness
+              </caption>
+              <thead className="text-slate-500"><tr><th className="px-3 py-2">Season</th><th className="px-3 py-2">Decided</th><th className="px-3 py-2">Ties</th><th className="px-3 py-2">Matched odds</th></tr></thead>
+              <tbody className="divide-y divide-sky-100/8 text-slate-200">
+                {historical.dataCompleteness.map((audit) => <tr key={audit.season}><td className="px-3 py-2">{audit.season}</td><td className="px-3 py-2">{audit.decidedGames}</td><td className="px-3 py-2">{audit.ties}</td><td className="px-3 py-2">{audit.gamesWithTimestampMatchedOdds}</td></tr>)}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
     </section>
   );
 }

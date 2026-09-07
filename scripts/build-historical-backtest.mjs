@@ -16,6 +16,9 @@ const OFFSEASON_CARRY = 0.65;
 const MAX_MARGIN_UPDATE = 1.4;
 const MARGIN_UPDATE_RATE = 0.1;
 const MODEL_VERSION = 'HIST-STR-1.0';
+const V2_MODEL_VERSION = 'V2.0-MARKET-ANCHOR-SHADOW';
+const DEVELOPMENT_SEASONS = [2021, 2022, 2023, 2024];
+const MARKET_WEIGHTS = [0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 1];
 
 function parseCsvRow(line) {
   const values = [];
@@ -126,22 +129,22 @@ function summary(records) {
   };
 }
 
-function calibration(records) {
-  const boundaries = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.9, 1.001];
+function calibration(records, probabilityFor = (record) => record.homeProbability) {
+  const boundaries = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 1.001];
   return boundaries.slice(0, -1).flatMap((lower, index) => {
     const upper = boundaries[index + 1];
     const bucket = records.filter((record) => {
       if (record.winner === 'Tie') return false;
       const confidence = Math.max(
-        record.homeProbability,
-        1 - record.homeProbability,
+        probabilityFor(record),
+        1 - probabilityFor(record),
       );
       return confidence >= lower && confidence < upper;
     });
     if (!bucket.length) return [];
     const averageConfidence = mean(
       bucket.map((record) =>
-        Math.max(record.homeProbability, 1 - record.homeProbability),
+        Math.max(probabilityFor(record), 1 - probabilityFor(record)),
       ),
     );
     const realizedRate =
@@ -156,6 +159,442 @@ function calibration(records) {
       },
     ];
   });
+}
+
+function impliedProbability(americanOdds) {
+  const odds = Number(americanOdds);
+  if (!Number.isFinite(odds) || odds === 0) return null;
+  return odds > 0 ? 100 / (odds + 100) : Math.abs(odds) / (Math.abs(odds) + 100);
+}
+
+function noVigHomeProbability(homeMoneyline, awayMoneyline) {
+  const home = impliedProbability(homeMoneyline);
+  const away = impliedProbability(awayMoneyline);
+  if (home === null || away === null || home + away <= 0) return null;
+  return home / (home + away);
+}
+
+function closingMarketFor(game) {
+  const homeMoneyline = Number(game.homeMoneyline);
+  const awayMoneyline = Number(game.awayMoneyline);
+  const expectedHomeMargin = Number(game.spreadLine);
+  const hasMargin = Number.isFinite(expectedHomeMargin);
+  return {
+    source: 'nflverse schedules closing market fields',
+    horizon: 'Closing-line timestamp is not provided by the source',
+    homeMoneyline: Number.isFinite(homeMoneyline) ? homeMoneyline : null,
+    awayMoneyline: Number.isFinite(awayMoneyline) ? awayMoneyline : null,
+    homeProbability: noVigHomeProbability(homeMoneyline, awayMoneyline),
+    expectedHomeMargin: hasMargin ? expectedHomeMargin : null,
+    homeSpread: hasMargin ? -expectedHomeMargin : null,
+    awaySpread: hasMargin ? expectedHomeMargin : null,
+    homeSpreadOdds: Number.isFinite(Number(game.homeSpreadOdds))
+      ? Number(game.homeSpreadOdds)
+      : null,
+    awaySpreadOdds: Number.isFinite(Number(game.awaySpreadOdds))
+      ? Number(game.awaySpreadOdds)
+      : null,
+  };
+}
+
+function marketRecords(records) {
+  return records.filter(
+    (record) =>
+      record.winner !== 'Tie' && record.closingMarket.homeProbability !== null,
+  );
+}
+
+function scoredSummary(records, probabilityFor, marginFor, pickFor) {
+  const graded = records.filter((record) => record.winner !== 'Tie');
+  const correct = graded.filter((record) => {
+    const probability = probabilityFor(record);
+    const pick = pickFor
+      ? pickFor(record, probability)
+      : probability >= 0.5
+        ? record.home
+        : record.away;
+    return pick === record.winner;
+  }).length;
+  const brier = mean(
+    graded.map((record) => {
+      const outcome = record.winner === record.home ? 1 : 0;
+      return (probabilityFor(record) - outcome) ** 2;
+    }),
+  );
+  const logLoss = mean(
+    graded.map((record) => {
+      const outcome = record.winner === record.home ? 1 : 0;
+      const probability = clamp(probabilityFor(record), 0.01, 0.99);
+      return -(
+        outcome * Math.log(probability) +
+        (1 - outcome) * Math.log(1 - probability)
+      );
+    }),
+  );
+  const marginErrors = marginFor
+    ? graded
+        .map((record) => {
+          const margin = marginFor(record);
+          return margin === null ? null : Math.abs(margin - record.actualHomeMargin);
+        })
+        .filter((value) => value !== null)
+    : [];
+  return {
+    games: graded.length,
+    tiesExcluded: records.length - graded.length,
+    correct,
+    incorrect: graded.length - correct,
+    accuracy: graded.length ? correct / graded.length : null,
+    accuracyInterval95: wilsonInterval(correct, graded.length),
+    brier,
+    logLoss,
+    marginMae: mean(marginErrors),
+    marginMedianAbsoluteError: percentile(marginErrors, 0.5),
+  };
+}
+
+function marketSummary(records) {
+  const paired = marketRecords(records);
+  return scoredSummary(
+    paired,
+    (record) => record.closingMarket.homeProbability,
+    (record) => record.closingMarket.expectedHomeMargin,
+  );
+}
+
+function metricDifference(model, market) {
+  return {
+    gamesPaired: market.games,
+    accuracy: model.accuracy === null || market.accuracy === null ? null : model.accuracy - market.accuracy,
+    brier: model.brier === null || market.brier === null ? null : model.brier - market.brier,
+    logLoss: model.logLoss === null || market.logLoss === null ? null : model.logLoss - market.logLoss,
+    marginMae: model.marginMae === null || market.marginMae === null ? null : model.marginMae - market.marginMae,
+  };
+}
+
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function pairedBootstrap(records, iterations = 1000) {
+  const paired = marketRecords(records);
+  if (!paired.length) return null;
+  const random = seededRandom(20260907);
+  const deltas = { accuracy: [], brier: [], logLoss: [], marginMae: [] };
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let accuracy = 0;
+    let brier = 0;
+    let logLoss = 0;
+    let marginMae = 0;
+    for (let index = 0; index < paired.length; index += 1) {
+      const record = paired[Math.floor(random() * paired.length)];
+      const outcome = record.winner === record.home ? 1 : 0;
+      const modelPick = record.homeProbability >= 0.5 ? record.home : record.away;
+      const marketPick = record.closingMarket.homeProbability >= 0.5 ? record.home : record.away;
+      accuracy += Number(modelPick === record.winner) - Number(marketPick === record.winner);
+      brier +=
+        (record.homeProbability - outcome) ** 2 -
+        (record.closingMarket.homeProbability - outcome) ** 2;
+      logLoss +=
+        -(outcome * Math.log(clamp(record.homeProbability, 0.01, 0.99)) +
+          (1 - outcome) * Math.log(clamp(1 - record.homeProbability, 0.01, 0.99))) +
+        (outcome * Math.log(clamp(record.closingMarket.homeProbability, 0.01, 0.99)) +
+          (1 - outcome) * Math.log(clamp(1 - record.closingMarket.homeProbability, 0.01, 0.99)));
+      marginMae +=
+        Math.abs(record.expectedHomeMargin - record.actualHomeMargin) -
+        Math.abs(record.closingMarket.expectedHomeMargin - record.actualHomeMargin);
+    }
+    deltas.accuracy.push(accuracy / paired.length);
+    deltas.brier.push(brier / paired.length);
+    deltas.logLoss.push(logLoss / paired.length);
+    deltas.marginMae.push(marginMae / paired.length);
+  }
+  return Object.fromEntries(
+    Object.entries(deltas).map(([metric, values]) => [
+      metric,
+      { low: percentile(values, 0.025), high: percentile(values, 0.975) },
+    ]),
+  );
+}
+
+function chooseMarketWeight(records) {
+  if (!records.length) return 0;
+  return [...MARKET_WEIGHTS].sort((left, right) => {
+    const leftBrier = mean(
+      records.map((record) => {
+        const probability =
+          record.closingMarket.homeProbability +
+          left * (record.homeProbability - record.closingMarket.homeProbability);
+        const outcome = record.winner === record.home ? 1 : 0;
+        return (probability - outcome) ** 2;
+      }),
+    );
+    const rightBrier = mean(
+      records.map((record) => {
+        const probability =
+          record.closingMarket.homeProbability +
+          right * (record.homeProbability - record.closingMarket.homeProbability);
+        const outcome = record.winner === record.home ? 1 : 0;
+        return (probability - outcome) ** 2;
+      }),
+    );
+    return leftBrier - rightBrier || left - right;
+  })[0];
+}
+
+function v2Replay(records) {
+  const training = [];
+  const enriched = [];
+  const selectedWeights = [];
+  for (const season of TEST_SEASONS) {
+    const seasonRecords = marketRecords(records.filter((record) => record.season === season));
+    const weight = chooseMarketWeight(training);
+    selectedWeights.push({ season, footballCorrectionWeight: weight, trainingGames: training.length });
+    for (const record of seasonRecords) {
+      enriched.push({
+        ...record,
+        v2HomeProbability: Number(
+          (record.closingMarket.homeProbability +
+            weight * (record.homeProbability - record.closingMarket.homeProbability)).toFixed(6),
+        ),
+        v2ExpectedHomeMargin: Number(
+          (record.closingMarket.expectedHomeMargin +
+            weight * (record.expectedHomeMargin - record.closingMarket.expectedHomeMargin)).toFixed(3),
+        ),
+      });
+    }
+    if (DEVELOPMENT_SEASONS.includes(season)) training.push(...seasonRecords);
+  }
+  const development = enriched.filter((record) => DEVELOPMENT_SEASONS.includes(record.season));
+  const holdout = enriched.filter((record) => record.season === 2025);
+  const summaryFor = (items) =>
+    scoredSummary(
+      items,
+      (record) => record.v2HomeProbability,
+      (record) => record.v2ExpectedHomeMargin,
+    );
+  return {
+    modelVersion: V2_MODEL_VERSION,
+    status: 'Shadow — not promoted as a proven live edge',
+    architecture:
+      'Market no-vig prior plus a football correction selected only from prior seasons.',
+    selectedWeights,
+    development: summaryFor(development),
+    holdout: summaryFor(holdout),
+    allFiveSeasons: summaryFor(enriched),
+    calibration: calibration(enriched, (record) => record.v2HomeProbability),
+    currentFootballCorrectionWeight: selectedWeights.at(-1)?.footballCorrectionWeight ?? 0,
+    promotion:
+      'The chronological grid selected a 0% football correction in every completed fold. V2 therefore defaults to the paired market probability when one is available and does not claim independent football edge.',
+  };
+}
+
+function normalCdf(value) {
+  const sign = value < 0 ? -1 : 1;
+  const x = Math.abs(value) / Math.sqrt(2);
+  const t = 1 / (1 + 0.3275911 * x);
+  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x));
+  return 0.5 * (1 + sign * erf);
+}
+
+function americanPayout(odds) {
+  if (!Number.isFinite(odds) || odds === 0) return null;
+  return odds > 0 ? odds / 100 : 100 / Math.abs(odds);
+}
+
+function spreadDiagnostics(records) {
+  const candidates = records.filter(
+    (record) =>
+      record.closingMarket.expectedHomeMargin !== null &&
+      record.winner !== 'Tie',
+  );
+  const residuals = candidates.map(
+    (record) => record.actualHomeMargin - record.expectedHomeMargin,
+  );
+  const residualStdDev = Math.sqrt(
+    mean(residuals.map((value) => (value - mean(residuals)) ** 2)),
+  );
+  const scored = candidates.map((record) => {
+    const line = record.closingMarket.expectedHomeMargin;
+    const edge = record.expectedHomeMargin - line;
+    const homeCoverProbability = clamp(
+      normalCdf((edge - 0.5) / residualStdDev),
+      0.01,
+      0.99,
+    );
+    const selectHome = homeCoverProbability >= 0.5;
+    const coverMargin = record.actualHomeMargin - line;
+    const result = coverMargin === 0 ? 'Push' : coverMargin > 0 ? 'Home cover' : 'Away cover';
+    const selectedOdds = selectHome
+      ? record.closingMarket.homeSpreadOdds
+      : record.closingMarket.awaySpreadOdds;
+    const selectedProbability = selectHome ? homeCoverProbability : 1 - homeCoverProbability;
+    const covered = result === 'Push' ? null : selectHome ? result === 'Home cover' : result === 'Away cover';
+    const breakEven = impliedProbability(selectedOdds);
+    const payout = americanPayout(selectedOdds);
+    return {
+      ...record,
+      selectedSide: selectHome ? record.home : record.away,
+      selectedProbability,
+      homeCoverProbability,
+      result,
+      covered,
+      breakEven,
+      claimedEdge: breakEven === null ? null : selectedProbability - breakEven,
+      profit: covered === null || payout === null ? 0 : covered ? payout : -1,
+    };
+  });
+  const decisions = scored.filter((record) => record.covered !== null);
+  const correct = decisions.filter((record) => record.covered).length;
+  const pushes = scored.filter((record) => record.covered === null).length;
+  const brier = mean(
+    decisions.map(
+      (record) => (record.homeCoverProbability - Number(record.result === 'Home cover')) ** 2,
+    ),
+  );
+  const logLoss = mean(
+    decisions.map((record) => {
+      const outcome = Number(record.result === 'Home cover');
+      return -(
+        outcome * Math.log(record.homeCoverProbability) +
+        (1 - outcome) * Math.log(1 - record.homeCoverProbability)
+      );
+    }),
+  );
+  const coverCalibration = [0.5, 0.52, 0.54, 0.56, 0.58, 0.6, 1.001].flatMap(
+    (lower, index, values) => {
+      const upper = values[index + 1];
+      if (!upper) return [];
+      const bucket = decisions.filter(
+        (record) => record.selectedProbability >= lower && record.selectedProbability < upper,
+      );
+      if (!bucket.length) return [];
+      return [{
+        label: upper >= 1 ? '60%+' : `${(lower * 100).toFixed(0)}–${(upper * 100 - 0.1).toFixed(1)}%`,
+        games: bucket.length,
+        predicted: mean(bucket.map((record) => record.selectedProbability)),
+        actual: mean(bucket.map((record) => Number(record.covered))),
+        brier: mean(bucket.map((record) => (record.selectedProbability - Number(record.covered)) ** 2)),
+      }];
+    },
+  );
+  const keyNumbers = [2.5, 3, 3.5, 6.5, 7, 7.5, 10].map((keyNumber) => {
+    const bucket = decisions.filter(
+      (record) => Math.abs(Math.abs(record.closingMarket.expectedHomeMargin) - keyNumber) < 0.1,
+    );
+    return {
+      keyNumber,
+      games: bucket.length,
+      accuracy: bucket.length ? mean(bucket.map((record) => Number(record.covered))) : null,
+    };
+  });
+  const edgeBoundaries = [0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.1, Infinity];
+  const edgeBins = edgeBoundaries.slice(0, -1).flatMap((lower, index) => {
+    const upper = edgeBoundaries[index + 1];
+    const bucket = decisions.filter(
+      (record) =>
+        record.claimedEdge !== null &&
+        record.claimedEdge >= lower &&
+        record.claimedEdge < upper,
+    );
+    if (!bucket.length) return [];
+    return [{
+      label: upper === Infinity ? '10%+' : `${(lower * 100).toFixed(0)}–${(upper * 100).toFixed(0)}%`,
+      games: bucket.length,
+      claimedEdge: mean(bucket.map((record) => record.claimedEdge)),
+      accuracy: mean(bucket.map((record) => Number(record.covered))),
+      roi: mean(bucket.map((record) => record.profit)),
+    }];
+  });
+  return {
+    scope: 'Closing-line exploratory proxy — not timestamp-matched to V1 prediction snapshots.',
+    gamesWithClosingSpread: scored.length,
+    atsDecisions: decisions.length,
+    correct,
+    incorrect: decisions.length - correct,
+    pushes,
+    accuracy: decisions.length ? correct / decisions.length : null,
+    coverBrier: brier,
+    coverLogLoss: logLoss,
+    residualStdDev,
+    calibration: coverCalibration,
+    keyNumbers,
+    edgeBins,
+    verdict:
+      'Not promotion-eligible. The cover probabilities use a descriptive normal margin-residual distribution and closing lines, not timestamp-matched historical market snapshots.',
+  };
+}
+
+function disagreementDiagnostics(records) {
+  const paired = marketRecords(records);
+  const groups = [
+    { label: 'Agrees with market favorite', test: (record) => (record.homeProbability >= 0.5) === (record.closingMarket.homeProbability >= 0.5) },
+    { label: 'Picks market underdog', test: (record) => (record.homeProbability >= 0.5) !== (record.closingMarket.homeProbability >= 0.5) },
+  ].map(({ label, test }) => {
+    const items = paired.filter(test);
+    const model = scoredSummary(items, (record) => record.homeProbability, (record) => record.expectedHomeMargin);
+    const market = marketSummary(items);
+    return { label, model, market, difference: metricDifference(model, market) };
+  });
+  const bins = [0, 0.02, 0.05, 0.08, 0.12, Infinity].flatMap((lower, index, values) => {
+    const upper = values[index + 1];
+    if (!upper) return [];
+    const items = paired.filter((record) => {
+      const difference = Math.abs(record.homeProbability - record.closingMarket.homeProbability);
+      return difference >= lower && difference < upper;
+    });
+    if (!items.length) return [];
+    return [{
+      label: upper === Infinity ? '12%+' : `${(lower * 100).toFixed(0)}–${(upper * 100).toFixed(0)} pts`,
+      games: items.length,
+      modelAccuracy: scoredSummary(items, (record) => record.homeProbability).accuracy,
+      marketAccuracy: marketSummary(items).accuracy,
+      modelBrier: scoredSummary(items, (record) => record.homeProbability).brier,
+      marketBrier: marketSummary(items).brier,
+    }];
+  });
+  return { groups, magnitudeBins: bins };
+}
+
+function errorDiagnostics(records) {
+  return records
+    .filter((record) => record.winner !== 'Tie')
+    .map((record) => {
+      const outcome = record.winner === record.home ? 1 : 0;
+      const pickProbability = Math.max(record.homeProbability, 1 - record.homeProbability);
+      const probabilityError = Math.abs(record.homeProbability - outcome);
+      const logLoss = -(
+        outcome * Math.log(clamp(record.homeProbability, 0.01, 0.99)) +
+        (1 - outcome) * Math.log(clamp(1 - record.homeProbability, 0.01, 0.99))
+      );
+      return {
+        gameId: record.gameId,
+        season: record.season,
+        phase: record.phase,
+        away: record.away,
+        home: record.home,
+        winnerError: record.correct ? 0 : 1,
+        probabilityError,
+        squaredProbabilityError: probabilityError ** 2,
+        logLoss,
+        marginError: Math.abs(record.expectedHomeMargin - record.actualHomeMargin),
+        marketDisagreement:
+          record.closingMarket.homeProbability === null
+            ? null
+            : record.homeProbability - record.closingMarket.homeProbability,
+        confidence: pickProbability,
+        severityScore: Math.min(100, (logLoss / Math.log(100)) * 100),
+      };
+    })
+    .sort((left, right) => right.severityScore - left.severityScore)
+    .slice(0, 10);
 }
 
 function createHashFor(snapshot) {
@@ -195,6 +634,11 @@ const games = rows
     awayScore: Number(row.away_score),
     homeScore: Number(row.home_score),
     neutral: row.location === 'Neutral',
+    homeMoneyline: row.home_moneyline,
+    awayMoneyline: row.away_moneyline,
+    spreadLine: row.spread_line,
+    homeSpreadOdds: row.home_spread_odds,
+    awaySpreadOdds: row.away_spread_odds,
   }))
   .sort(
     (left, right) =>
@@ -270,6 +714,7 @@ for (let start = 0; start < games.length;) {
       records.push({
         ...prediction,
         predictionHash,
+        closingMarket: closingMarketFor(game),
         awayScore: game.awayScore,
         homeScore: game.homeScore,
         actualHomeMargin,
@@ -345,6 +790,66 @@ const worstMisses = records
     actualHomeMargin: record.actualHomeMargin,
   }));
 
+const closingMarketBySeason = TEST_SEASONS.map((season) => {
+  const seasonRecords = records.filter((record) => record.season === season);
+  const pairedModel = summary(marketRecords(seasonRecords));
+  const market = marketSummary(seasonRecords);
+  return {
+    season,
+    modelV1: pairedModel,
+    closingMarket: market,
+    difference: metricDifference(pairedModel, market),
+  };
+});
+const pairedModelV1 = summary(marketRecords(records));
+const closingMarket = marketSummary(records);
+const marketBenchmark = {
+  label: 'Closing-line market benchmark (not timestamp-matched)',
+  source: {
+    label: 'nflverse schedule closing odds fields',
+    url: SOURCE_URL,
+  },
+  caveat:
+    'The source supplies historical odds and spreads but not an observation timestamp. These are closing-line diagnostics, not same-horizon tests against V1\'s frozen daily prediction snapshots.',
+  overall: closingMarket,
+  bySeason: closingMarketBySeason,
+  pairedV1: pairedModelV1,
+  difference: metricDifference(pairedModelV1, closingMarket),
+  bootstrapDifference95: pairedBootstrap(records),
+};
+const v2 = v2Replay(records);
+const spread = spreadDiagnostics(records);
+const marketDisagreement = disagreementDiagnostics(records);
+const errorSeverity = errorDiagnostics(records);
+const dataCompleteness = TEST_SEASONS.map((season) => {
+  const scheduled = rows.filter(
+    (row) =>
+      Number(row.season) === season &&
+      ['REG', 'WC', 'DIV', 'CON', 'SB'].includes(row.game_type),
+  );
+  const completed = scheduled.filter(
+    (row) => Number.isFinite(Number(row.home_score)) && Number.isFinite(Number(row.away_score)),
+  );
+  const decided = completed.filter((row) => Number(row.home_score) !== Number(row.away_score));
+  const odds = completed.filter(
+    (row) => noVigHomeProbability(row.home_moneyline, row.away_moneyline) !== null,
+  );
+  const spreads = completed.filter((row) => Number.isFinite(Number(row.spread_line)));
+  return {
+    season,
+    scheduledGames: scheduled.length,
+    completedGames: completed.length,
+    decidedGames: decided.length,
+    ties: completed.length - decided.length,
+    canceledGames: scheduled.length - completed.length,
+    gamesWithMoneyline: odds.length,
+    gamesWithClosingSpread: spreads.length,
+    gamesWithTimestampMatchedOdds: 0,
+    gamesWithHistoricalInjurySnapshots: 0,
+    gamesWithFullFeatureCoverage: completed.length,
+  };
+});
+
 const output = `// Generated by scripts/build-historical-backtest.mjs. Do not edit by hand.\n\nexport const HISTORICAL_BACKTEST = ${JSON.stringify(
   {
     modelVersion: MODEL_VERSION,
@@ -365,7 +870,7 @@ const output = `// Generated by scripts/build-historical-backtest.mjs. Do not ed
     },
     limitations: [
       'This is a common-feature replay. Timestamp-correct historical injury, roster, weather, and odds snapshots were not available in the selected source and were excluded rather than inferred after the fact.',
-      'Historical closing lines are not used as pregame inputs. The replay makes no historical ROI, CLV, spread-cover, or market-beating claim.',
+      'The historical source includes closing odds fields but does not include an odds-observed timestamp. Closing-market and spread diagnostics are explicitly labeled later-information proxies, not same-horizon comparisons or evidence of a betting edge.',
       'The model does not assign tie probability; tied games are retained in the audit but excluded from binary winner metrics.',
     ],
     overall,
@@ -375,6 +880,12 @@ const output = `// Generated by scripts/build-historical-backtest.mjs. Do not ed
     bySeason,
     calibration: calibration(records),
     worstMisses,
+    dataCompleteness,
+    marketBenchmark,
+    v2,
+    spread,
+    marketDisagreement,
+    errorSeverity,
     records,
   },
   null,

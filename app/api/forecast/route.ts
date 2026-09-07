@@ -89,11 +89,11 @@ export async function GET(request: Request) {
         retrievedAt: new Date().toISOString(),
         source,
         model: {
-          label: 'Football-only strength prior + venue edge',
+          label: 'Football fallback: strength prior + venue edge',
           ratings: TEAM_RATINGS,
           learning: learned,
           notes:
-            'This football forecast does not ingest game betting lines. Baseline strength is a preseason prior derived from published 2026 win totals; completed weekly audits make only capped calibration changes before verified live inputs are applied.',
+            'This layer is the transparent football fallback. V2 uses a paired live no-vig market probability as its current forecast prior when available; completed weekly audits retain the football layer for review and for matchups without a paired market line.',
         },
       },
       { headers: { 'cache-control': 'no-store, max-age=0' } },

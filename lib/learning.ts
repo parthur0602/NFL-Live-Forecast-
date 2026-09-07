@@ -2,8 +2,10 @@ import { env } from 'cloudflare:workers';
 import { DEFAULT_LEARNED_MODEL, type LearnedModelState } from '@/lib/forecast';
 
 const SEASON = 2026;
-const MAX_HOME_EDGE_STEP = 0.15;
-const MAX_SHRINK_STEP = 0.04;
+const MAX_HOME_EDGE_STEP = 0.05;
+const MAX_SHRINK_STEP = 0.015;
+const MIN_CALIBRATION_SAMPLE = 48;
+const MIN_STABLE_RESIDUAL = 0.025;
 
 type DatabaseEnv = { DB?: D1Database };
 type Snapshot = {
@@ -230,15 +232,15 @@ function insightFor(
   const parts: string[] = [];
   if (homeResidual <= -0.06)
     parts.push(
-      `Home teams won ${Math.abs(homeResidual * 100).toFixed(1)} points less often than the model expected, so the venue edge is trimmed.`,
+      `Home teams won ${Math.abs(homeResidual * 100).toFixed(1)} points less often than the model expected; the venue calibration is reviewed against the full season-to-date sample.`,
     );
   else if (homeResidual >= 0.06)
     parts.push(
-      `Home teams won ${(homeResidual * 100).toFixed(1)} points more often than expected, so the venue edge is nudged upward.`,
+      `Home teams won ${(homeResidual * 100).toFixed(1)} points more often than expected; the venue calibration is reviewed against the full season-to-date sample.`,
     );
   if (favoriteResidual <= -0.06)
     parts.push(
-      `Favorites went ${correct}-${games.length - correct} against the model's expected ${expectedCorrect.toFixed(1)} wins, so confidence is pulled closer to 50%.`,
+      `Favorites went ${correct}-${games.length - correct} against the model's expected ${expectedCorrect.toFixed(1)} wins; confidence is reviewed against the full season-to-date sample.`,
     );
   if (!parts.length)
     parts.push(
@@ -299,16 +301,37 @@ async function learnCompletedWeek(week: number) {
         ),
       0,
     ) / games.length;
-  const homeEdgeDelta = clamp(
-    homeResidual * 4.8 * 0.32,
-    -MAX_HOME_EDGE_STEP,
-    MAX_HOME_EDGE_STEP,
-  );
-  const shrinkageDelta = clamp(
-    Math.max(0, -favoriteResidual) * 0.18,
-    0,
-    MAX_SHRINK_STEP,
-  );
+  const cumulative = await database
+    .prepare(
+      `SELECT COUNT(*) AS count, AVG((CASE WHEN winner = home_team THEN 1.0 ELSE 0.0 END) - home_probability) AS home_residual, AVG((CASE WHEN correct = 1 THEN 1.0 ELSE 0.0 END) - favorite_probability) AS favorite_residual FROM prediction_snapshots WHERE season = ? AND week <= ? AND winner IS NOT NULL`,
+    )
+    .bind(SEASON, week)
+    .first<{
+      count: number;
+      home_residual: number | null;
+      favorite_residual: number | null;
+    }>();
+  const stableHomeResidual = cumulative?.home_residual ?? 0;
+  const stableFavoriteResidual = cumulative?.favorite_residual ?? 0;
+  const hasStableSample = (cumulative?.count ?? 0) >= MIN_CALIBRATION_SAMPLE;
+  // Weekly scores teach the audit, but parameters move only after a wider,
+  // season-to-date sample clears a small, pre-set residual threshold.
+  const homeEdgeDelta =
+    hasStableSample && Math.abs(stableHomeResidual) >= MIN_STABLE_RESIDUAL
+      ? clamp(
+          stableHomeResidual * 4.8 * 0.14,
+          -MAX_HOME_EDGE_STEP,
+          MAX_HOME_EDGE_STEP,
+        )
+      : 0;
+  const shrinkageDelta =
+    hasStableSample && stableFavoriteResidual <= -MIN_STABLE_RESIDUAL
+      ? clamp(
+          Math.abs(stableFavoriteResidual) * 0.08,
+          0,
+          MAX_SHRINK_STEP,
+        )
+      : 0;
   const now = new Date().toISOString();
   const insight = insightFor(
     week,
@@ -342,8 +365,10 @@ async function learnCompletedWeek(week: number) {
         SEASON,
         week,
         homeEdgeDelta,
-        `Venue residual after Week ${week}`,
-        games.length,
+        hasStableSample
+          ? `Season-to-date venue residual through Week ${week}`
+          : `Audit only through Week ${week}; fewer than ${MIN_CALIBRATION_SAMPLE} settled snapshots`,
+        cumulative?.count ?? games.length,
         now,
       ),
     database
@@ -354,8 +379,10 @@ async function learnCompletedWeek(week: number) {
         SEASON,
         week,
         shrinkageDelta,
-        `Favorite calibration after Week ${week}`,
-        games.length,
+        hasStableSample
+          ? `Season-to-date favorite calibration through Week ${week}`
+          : `Audit only through Week ${week}; fewer than ${MIN_CALIBRATION_SAMPLE} settled snapshots`,
+        cumulative?.count ?? games.length,
         now,
       ),
   ]);
@@ -601,7 +628,7 @@ export async function learningDashboard(): Promise<LearningDashboard> {
       createdAt: item.created_at,
     })),
     pendingSnapshots: pending?.count ?? 0,
-    note: 'Predictions are frozen the first time the desk captures a matchup before its result is recorded. Weekly learning runs only after at least 12 captured games in a week are final, then makes capped calibration changes for later games.',
+    note: 'Predictions are frozen before kickoff. A completed week creates an audit after at least 12 captured final games, but football parameters move only when at least 48 season-to-date snapshots show a pre-set persistent residual. V2 remains market-anchored when a paired live market probability exists.',
   };
 }
 
