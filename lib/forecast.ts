@@ -52,6 +52,32 @@ export function probability(home: string, away: string, neutral = false, adjustm
   return logistic((homeRating - awayRating + (neutral ? 0 : HOME_FIELD_EDGE)) / LOGISTIC_SCALE);
 }
 
+export type LearnedModelState = {
+  completedWeeks: number;
+  homeFieldAdjustment: number;
+  confidenceShrinkage: number;
+};
+
+export const DEFAULT_LEARNED_MODEL: LearnedModelState = {
+  completedWeeks: 0,
+  homeFieldAdjustment: 0,
+  confidenceShrinkage: 0,
+};
+
+export function learnedProbability(
+  home: string,
+  away: string,
+  neutral = false,
+  adjustments: Record<string, number> = {},
+  learned: LearnedModelState = DEFAULT_LEARNED_MODEL,
+) {
+  const homeRating = (TEAM_RATINGS[home] ?? 0) + (adjustments[home] ?? 0);
+  const awayRating = (TEAM_RATINGS[away] ?? 0) + (adjustments[away] ?? 0);
+  const venue = neutral ? 0 : HOME_FIELD_EDGE + learned.homeFieldAdjustment;
+  const raw = logistic((homeRating - awayRating + venue) / LOGISTIC_SCALE);
+  return 0.5 + (raw - 0.5) * (1 - learned.confidenceShrinkage);
+}
+
 export function decodeAttribute(value: string) {
   return value.replaceAll('&quot;', '"').replaceAll('&amp;', '&').replaceAll('&#x27;', "'");
 }

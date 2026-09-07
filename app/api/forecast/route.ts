@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { decodeAttribute, probability, SCHEDULE_BASE_URL, TEAM_ALIASES, TEAM_RATINGS, toDisplayDate } from '@/lib/forecast';
+import { decodeAttribute, learnedProbability, SCHEDULE_BASE_URL, TEAM_ALIASES, TEAM_RATINGS, toDisplayDate } from '@/lib/forecast';
+import { safeModelState } from '@/lib/learning';
 
 type ScheduleGame = {
   id: string;
@@ -12,7 +13,7 @@ type ScheduleGame = {
   source: string;
 };
 
-function parseWeek(html: string, week: number, source: string): ScheduleGame[] {
+function parseWeek(html: string, week: number, source: string, learned: Awaited<ReturnType<typeof safeModelState>>): ScheduleGame[] {
   const unique = new Map<string, ScheduleGame>();
   for (const match of html.matchAll(/data-analytics="([^"]+)"/g)) {
     try {
@@ -27,7 +28,7 @@ function parseWeek(html: string, week: number, source: string): ScheduleGame[] {
       const game = {
         id: String(item.gameId), week, away, home, neutral,
         date: toDisplayDate(item.linkName),
-        homeProbability: probability(home, away, neutral), source,
+        homeProbability: learnedProbability(home, away, neutral, {}, learned), source,
       };
       unique.set(`${away}:${home}`, game);
     } catch {
@@ -44,12 +45,13 @@ export async function GET(request: Request) {
   const source = `${SCHEDULE_BASE_URL}/week-${week}`;
 
   try {
+    const learned = await safeModelState();
     const response = await fetch(source, {
       headers: { 'user-agent': 'NFL Forecast Desk / schedule reader' },
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`NFL schedule returned ${response.status}`);
-    const games = parseWeek(await response.text(), week, source);
+    const games = parseWeek(await response.text(), week, source, learned);
     if (!games.length) throw new Error('No game cards were found on the official schedule page.');
 
     return NextResponse.json({
@@ -57,7 +59,8 @@ export async function GET(request: Request) {
       model: {
         label: 'Market-strength baseline + venue edge',
         ratings: TEAM_RATINGS,
-        notes: 'Baseline strength is a preseason prior derived from published 2026 win totals. The live layer is applied in the browser after verified updates arrive.',
+        learning: learned,
+        notes: 'Baseline strength is a preseason prior derived from published 2026 win totals. Completed weekly audits make only capped calibration changes; the live layer is then applied in the browser after verified updates arrive.',
       },
     }, { headers: { 'cache-control': 'no-store, max-age=0' } });
   } catch (error) {
