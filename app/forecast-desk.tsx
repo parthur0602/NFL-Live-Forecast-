@@ -135,6 +135,7 @@ type Market = {
 type RenderedGame = Game & {
   adjustedHome: number;
   delta: number;
+  expectedMargin: number;
   market: MarketLine | null;
 };
 type ModelContext = {
@@ -173,6 +174,10 @@ function formatLine(value: number | null) {
 function formatOdds(value: number | null) {
   return value === null ? '—' : `${value > 0 ? '+' : ''}${value}`;
 }
+function formatPrice(line: number | null, odds: number | null) {
+  if (line === null) return '—';
+  return `${formatSigned(line)} (${formatOdds(odds)})`;
+}
 function probabilityFor(
   game: Game,
   ratings: Record<string, number>,
@@ -192,6 +197,16 @@ function probabilityFor(
         ) / 4.8,
       ));
   return 0.5 + (raw - 0.5) * (1 - learning.confidenceShrinkage);
+}
+function expectedMarginFor(
+  game: Game,
+  ratings: Record<string, number>,
+  adjustments: Record<string, number>,
+  learning: LearningState,
+) {
+  const home = (ratings[game.home] ?? 0) + (adjustments[game.home] ?? 0);
+  const away = (ratings[game.away] ?? 0) + (adjustments[game.away] ?? 0);
+  return home - away + (game.neutral ? 0 : 1.1 + learning.homeFieldAdjustment);
 }
 
 export function ForecastDesk() {
@@ -457,6 +472,16 @@ export function ForecastDesk() {
           ...game,
           adjustedHome,
           delta: adjustedHome - game.homeProbability,
+          expectedMargin: expectedMarginFor(
+            game,
+            forecast?.model.ratings ?? {},
+            live?.adjustments ?? {},
+            forecast?.model.learning ?? {
+              completedWeeks: 0,
+              homeFieldAdjustment: 0,
+              confidenceShrinkage: 0,
+            },
+          ),
           market:
             market?.lines.find(
               (line) => line.gameKey === `${game.away}__${game.home}`,
@@ -907,59 +932,123 @@ function BettingBoard({
                   : Math.abs(difference) < 0.03
                     ? 'No material separation'
                     : 'Review disagreement';
+              const spreadEdge =
+                line?.homeSpread === null || line?.homeSpread === undefined
+                  ? null
+                  : game.expectedMargin + line.homeSpread;
+              const spreadSelection =
+                spreadEdge === null
+                  ? 'No spread line'
+                  : spreadEdge >= 0.25
+                    ? `${game.home} ${formatPrice(line.homeSpread, line.homeSpreadOdds)}`
+                    : spreadEdge <= -0.25
+                      ? `${game.away} ${formatPrice(line.awaySpread, line.awaySpreadOdds)}`
+                      : 'Pass — no clear spread edge';
+              const moneylineSelection =
+                game.adjustedHome >= 0.5
+                  ? `${game.home} ${formatOdds(line?.homeMoneyline ?? null)}`
+                  : `${game.away} ${formatOdds(line?.awayMoneyline ?? null)}`;
               return (
-                <div
-                  key={`market-${game.id}`}
-                  className="grid gap-3 px-5 py-3.5 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_150px]"
-                >
-                  <div>
-                    <p className="text-sm font-semibold text-slate-100">
-                      {game.away} at {game.home}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-400">
-                      ML {formatOdds(line?.awayMoneyline ?? null)} /{' '}
-                      {formatOdds(line?.homeMoneyline ?? null)} · Spread{' '}
-                      {formatSigned(line?.awaySpread ?? null)} /{' '}
-                      {formatSigned(line?.homeSpread ?? null)} · O/U{' '}
-                      {formatLine(line?.totalLine ?? null)}
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
+                <div key={`market-${game.id}`} className="space-y-3 px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <p className="text-slate-500">Football model</p>
-                      <p className="mt-0.5 font-semibold text-white">
-                        {(game.adjustedHome * 100).toFixed(1)}% {game.home}
+                      <p className="text-sm font-semibold text-slate-100">
+                        {game.away} at {game.home}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        Moneyline: {formatOdds(line?.awayMoneyline ?? null)} /{' '}
+                        {formatOdds(line?.homeMoneyline ?? null)}
                       </p>
                     </div>
-                    <div>
-                      <p className="text-slate-500">Vig-free market</p>
-                      <p className="mt-0.5 font-semibold text-white">
-                        {marketHome === null
+                    <div className="rounded-lg border border-[#e9b949]/30 bg-[#e9b949]/10 px-3 py-2 text-right">
+                      <p className="text-[10px] font-bold uppercase tracking-[.12em] text-[#e9b949]">
+                        Model selections
+                      </p>
+                      <p className="mt-1 text-xs font-semibold text-white">
+                        ML: {moneylineSelection}
+                      </p>
+                      <p className="mt-0.5 text-xs font-semibold text-[#f6d787]">
+                        Spread: {spreadSelection}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 text-xs md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_170px]">
+                    <div className="rounded-lg border border-sky-100/10 bg-[#071a28]/60 px-3 py-2.5">
+                      <p className="font-bold uppercase tracking-[.1em] text-slate-500">
+                        Full current board
+                      </p>
+                      <p className="mt-1.5 text-slate-300">
+                        Spread:{' '}
+                        {formatPrice(
+                          line?.awaySpread ?? null,
+                          line?.awaySpreadOdds ?? null,
+                        )}{' '}
+                        away ·{' '}
+                        {formatPrice(
+                          line?.homeSpread ?? null,
+                          line?.homeSpreadOdds ?? null,
+                        )}{' '}
+                        home
+                      </p>
+                      <p className="mt-1 text-slate-300">
+                        Total: {formatLine(line?.totalLine ?? null)} · Over{' '}
+                        {formatOdds(line?.overOdds ?? null)} / Under{' '}
+                        {formatOdds(line?.underOdds ?? null)}
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 rounded-lg border border-sky-100/10 bg-[#071a28]/60 px-3 py-2.5">
+                      <div>
+                        <p className="text-slate-500">Football model</p>
+                        <p className="mt-0.5 font-semibold text-white">
+                          {(game.adjustedHome * 100).toFixed(1)}% {game.home}
+                        </p>
+                        <p className="mt-1 text-slate-400">
+                          Margin proxy {formatSigned(game.expectedMargin)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-slate-500">Vig-free market</p>
+                        <p className="mt-0.5 font-semibold text-white">
+                          {marketHome === null
+                            ? '—'
+                            : `${(marketHome * 100).toFixed(1)}% ${game.home}`}
+                        </p>
+                        <p className="mt-1 text-slate-400">
+                          {market?.source.label}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-sky-100/10 bg-[#071a28]/70 px-3 py-2">
+                      <p className="text-[10px] font-bold uppercase tracking-[.12em] text-slate-500">
+                        Market status
+                      </p>
+                      <p className="mt-1 text-xs font-semibold text-[#f6d787]">
+                        {label}
+                      </p>
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        ML{' '}
+                        {difference === null
+                          ? 'track only'
+                          : `${difference > 0 ? '+' : ''}${(difference * 100).toFixed(1)} pts to home`}
+                      </p>
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        Spread edge{' '}
+                        {spreadEdge === null
                           ? '—'
-                          : `${(marketHome * 100).toFixed(1)}% ${game.home}`}
+                          : `${spreadEdge > 0 ? '+' : ''}${spreadEdge.toFixed(1)} pts`}
                       </p>
                     </div>
-                  </div>
-                  <div className="rounded-lg border border-sky-100/10 bg-[#071a28]/70 px-3 py-2">
-                    <p className="text-[10px] font-bold uppercase tracking-[.12em] text-slate-500">
-                      Decision status
-                    </p>
-                    <p className="mt-1 text-xs font-semibold text-[#f6d787]">
-                      {label}
-                    </p>
-                    <p className="mt-1 text-[11px] text-slate-400">
-                      {difference === null
-                        ? 'Track only'
-                        : `${difference > 0 ? '+' : ''}${(difference * 100).toFixed(1)} pts to home`}
-                    </p>
                   </div>
                 </div>
               );
             })}
           </div>
           <div className="border-t border-sky-100/10 px-5 py-3 text-xs leading-5 text-slate-400">
-            {market.note} Spread and total predictions are intentionally
-            withheld until separate, out-of-sample-tested models are available.
+            {market.note} Every refresh is retained as an immutable market
+            snapshot. The spread selection is a transparent strength-margin
+            proxy; it is not presented as a validated cover probability. Totals
+            remain informational until a separate, out-of-sample-tested total
+            model is available.
           </div>
         </>
       )}
