@@ -132,6 +132,68 @@ type Market = {
   lines: MarketLine[];
   note: string;
 };
+type BacktestMetric = {
+  games: number;
+  tiesExcluded: number;
+  correct: number;
+  incorrect: number;
+  accuracy: number | null;
+  accuracyInterval95: { low: number; high: number } | null;
+  brier: number | null;
+  logLoss: number | null;
+  marginMae: number | null;
+  marginMedianAbsoluteError: number | null;
+};
+type HistoricalBacktest = {
+  modelVersion: string;
+  source: { label: string; url: string };
+  seasons: number[];
+  generatedAt: string;
+  methodology: {
+    label: string;
+    homeFieldEdge: number;
+    logisticScale: number;
+    offseasonCarry: number;
+    updateRule: string;
+    freezeRule: string;
+    holdoutRule: string;
+  };
+  limitations: string[];
+  overall: BacktestMetric;
+  regularSeason: BacktestMetric;
+  postseason: BacktestMetric;
+  holdout: {
+    season: number;
+    overall: BacktestMetric;
+    regularSeason: BacktestMetric;
+    postseason: BacktestMetric;
+  } | null;
+  bySeason: Array<{
+    season: number;
+    overall: BacktestMetric;
+    regularSeason: BacktestMetric;
+    postseason: BacktestMetric;
+  }>;
+  calibration: Array<{
+    label: string;
+    games: number;
+    predicted: number;
+    actual: number;
+    gap: number;
+  }>;
+  worstMisses: Array<{
+    gameId: string;
+    season: number;
+    phase: string;
+    away: string;
+    home: string;
+    predictedWinner: string;
+    winner: string;
+    pickProbability: number;
+    expectedHomeMargin: number;
+    actualHomeMargin: number;
+  }>;
+};
 type RenderedGame = Game & {
   adjustedHome: number;
   delta: number;
@@ -177,6 +239,12 @@ function formatOdds(value: number | null) {
 function formatPrice(line: number | null, odds: number | null) {
   if (line === null) return '—';
   return `${formatSigned(line)} (${formatOdds(odds)})`;
+}
+function formatPercent(value: number | null, fractionDigits = 1) {
+  return value === null ? '—' : `${(value * 100).toFixed(fractionDigits)}%`;
+}
+function formatMetric(value: number | null, fractionDigits = 3) {
+  return value === null ? '—' : value.toFixed(fractionDigits);
 }
 function probabilityFor(
   game: Game,
@@ -229,10 +297,12 @@ export function ForecastDesk() {
   const [live, setLive] = useState<Live | null>(null);
   const [learning, setLearning] = useState<Learning | null>(null);
   const [market, setMarket] = useState<Market | null>(null);
+  const [historical, setHistorical] = useState<HistoricalBacktest | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [marketError, setMarketError] = useState<string | null>(null);
+  const [historicalError, setHistoricalError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const stateRef = useRef({ week, forecast, live });
   useEffect(() => {
@@ -276,6 +346,17 @@ export function ForecastDesk() {
     if (!response.ok)
       throw new Error(body.error ?? 'Could not refresh the market reference.');
     setMarket(body);
+    return body;
+  }, []);
+  const refreshHistorical = useCallback(async () => {
+    setHistoricalError(null);
+    const response = await fetch('/api/historical', { cache: 'no-store' });
+    const body = (await response.json()) as HistoricalBacktest & {
+      error?: string;
+    };
+    if (!response.ok)
+      throw new Error(body.error ?? 'Could not load the historical replay.');
+    setHistorical(body);
     return body;
   }, []);
   const refreshAll = useCallback(
@@ -366,6 +447,15 @@ export function ForecastDesk() {
     }, 0);
     return () => window.clearTimeout(initialRefresh);
   }, [refreshAll]);
+  useEffect(() => {
+    void refreshHistorical().catch((error) => {
+      setHistoricalError(
+        error instanceof Error
+          ? error.message
+          : 'Could not load the historical replay.',
+      );
+    });
+  }, [refreshHistorical]);
   useEffect(() => {
     const timer = window.setInterval(
       () => {
@@ -466,8 +556,33 @@ export function ForecastDesk() {
         };
       },
     });
+    register({
+      name: 'get_nfl_historical_backtest',
+      title: 'Get NFL historical backtest',
+      description:
+        'Read the frozen 2021–2025 historical accuracy summary, including the 2025 holdout result.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      async execute(input) {
+        if (typeof input !== 'object' || input === null || Array.isArray(input))
+          throw new Error('Expected an empty object.');
+        const result = await refreshHistorical();
+        return {
+          modelVersion: result.modelVersion,
+          seasons: result.seasons,
+          accuracy: result.overall.accuracy,
+          correct: result.overall.correct,
+          incorrect: result.overall.incorrect,
+          holdout2025Accuracy: result.holdout?.overall.accuracy ?? null,
+        };
+      },
+    });
     return () => lifecycle.abort();
-  }, [changeWeek, refreshLive]);
+  }, [changeWeek, refreshHistorical, refreshLive]);
 
   const renderedGames = useMemo(
     () =>
@@ -631,7 +746,7 @@ export function ForecastDesk() {
                 </Button>
               </div>
             </div>
-            <div className="mb-4 grid grid-cols-2 overflow-hidden rounded-xl border border-sky-100/10 bg-[#0b2030] sm:grid-cols-4">
+            <div className="mb-4 grid grid-cols-2 overflow-hidden rounded-xl border border-sky-100/10 bg-[#0b2030] md:grid-cols-5">
               <Metric label="Selected" value={`Week ${week}`} />
               <Metric
                 label="On deck"
@@ -649,7 +764,17 @@ export function ForecastDesk() {
                 label="Applied"
                 value={`${appliedCount} update${appliedCount === 1 ? '' : 's'}`}
               />
+              <Metric
+                label="Historical"
+                value={
+                  historical
+                    ? formatPercent(historical.overall.accuracy)
+                    : 'Loading'
+                }
+              />
             </div>
+            {historical && <HistoricalPerformance historical={historical} />}
+            {historicalError && <Notice tone="warn" text={historicalError} />}
             {learning && <LearningPanel learning={learning} />}
             {forecast && <BettingBoard games={renderedGames} market={market} />}
             {forecastError && <Notice tone="error" text={forecastError} />}
@@ -1096,6 +1221,221 @@ function BettingBoard({
         </>
       )}
     </section>
+  );
+}
+function HistoricalPerformance({
+  historical,
+}: {
+  historical: HistoricalBacktest;
+}) {
+  const widestCalibrationGap = [...historical.calibration].sort(
+    (left, right) => left.gap - right.gap,
+  )[0];
+  const accuracyInterval = historical.overall.accuracyInterval95;
+  return (
+    <section className="mb-5 overflow-hidden rounded-2xl border border-[#e9b949]/30 bg-[#102638]/95 shadow-xl shadow-black/10">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-sky-100/10 px-5 py-4">
+        <div className="flex gap-3">
+          <div className="grid size-9 place-items-center rounded-xl bg-[#e9b949]/15 text-[#f6d787]">
+            <Target className="size-5" />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[.16em] text-[#e9b949]">
+              Historical accuracy
+            </p>
+            <h3 className="mt-0.5 font-bold text-white">
+              {formatPercent(historical.overall.accuracy)} winner accuracy in a
+              frozen five-season replay
+            </h3>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
+              {historical.overall.correct} correct picks and{' '}
+              {historical.overall.incorrect} incorrect picks across{' '}
+              {historical.overall.games.toLocaleString()} graded games from{' '}
+              {historical.seasons[0]}–{historical.seasons.at(-1)}.
+              {accuracyInterval && (
+                <>
+                  {' '}
+                  The 95% accuracy interval is{' '}
+                  {formatPercent(accuracyInterval.low)}–
+                  {formatPercent(accuracyInterval.high)}.
+                </>
+              )}
+            </p>
+          </div>
+        </div>
+        <a
+          href={historical.source.url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-sky-300 hover:text-white"
+        >
+          {historical.source.label} <ArrowUpRight className="size-3" />
+        </a>
+      </div>
+
+      <div className="grid divide-y divide-sky-100/10 border-b border-sky-100/10 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+        <HistoricalMetric
+          label="Regular season"
+          value={formatPercent(historical.regularSeason.accuracy)}
+          detail={`${historical.regularSeason.correct}–${historical.regularSeason.incorrect}`}
+        />
+        <HistoricalMetric
+          label="Postseason"
+          value={formatPercent(historical.postseason.accuracy)}
+          detail={`${historical.postseason.correct}–${historical.postseason.incorrect}`}
+        />
+        <HistoricalMetric
+          label="2025 locked holdout"
+          value={formatPercent(historical.holdout?.overall.accuracy ?? null)}
+          detail={
+            historical.holdout
+              ? `${historical.holdout.overall.correct}–${historical.holdout.overall.incorrect}`
+              : 'Unavailable'
+          }
+        />
+        <HistoricalMetric
+          label="Probability quality"
+          value={formatMetric(historical.overall.brier)}
+          detail="Brier score · lower is better"
+        />
+      </div>
+
+      <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(250px,0.65fr)]">
+        <div className="overflow-x-auto rounded-xl border border-sky-100/10">
+          <table className="w-full min-w-[640px] text-left text-sm">
+            <caption className="border-b border-sky-100/10 bg-[#071a28]/65 px-4 py-3 text-left text-xs font-bold uppercase tracking-[.13em] text-slate-400">
+              Year-by-year locked results
+            </caption>
+            <thead className="bg-[#071a28]/40 text-xs uppercase tracking-[.1em] text-slate-500">
+              <tr>
+                <th className="px-4 py-3 font-semibold">Season</th>
+                <th className="px-4 py-3 font-semibold">Overall</th>
+                <th className="px-4 py-3 font-semibold">Regular</th>
+                <th className="px-4 py-3 font-semibold">Postseason</th>
+                <th className="px-4 py-3 font-semibold">Brier</th>
+                <th className="px-4 py-3 font-semibold">Margin MAE</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-sky-100/8 text-slate-200">
+              {historical.bySeason.map((season) => (
+                <tr key={season.season} className="bg-[#0b2030]/50">
+                  <td className="px-4 py-3 font-semibold text-white">
+                    {season.season}{' '}
+                    {season.season === 2025 && (
+                      <span className="ml-1 rounded-full bg-[#e9b949]/12 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#f6d787]">
+                        Holdout
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {formatPercent(season.overall.accuracy)}{' '}
+                    <span className="text-xs text-slate-500">
+                      {season.overall.correct}–{season.overall.incorrect}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {formatPercent(season.regularSeason.accuracy)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {formatPercent(season.postseason.accuracy)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {formatMetric(season.overall.brier)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {formatMetric(season.overall.marginMae, 1)} pts
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="space-y-3">
+          <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+              Calibration signal
+            </p>
+            {widestCalibrationGap ? (
+              <p className="mt-2 text-sm leading-6 text-slate-200">
+                In the {widestCalibrationGap.label} confidence bucket, the model
+                predicted {formatPercent(widestCalibrationGap.predicted)} but
+                picks won {formatPercent(widestCalibrationGap.actual)}. This is
+                a calibration warning, not a reason to rewrite past predictions.
+              </p>
+            ) : (
+              <p className="mt-2 text-sm text-slate-400">
+                Calibration groups are still loading.
+              </p>
+            )}
+          </div>
+          <div className="rounded-xl border border-sky-100/10 bg-[#071a28]/65 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+              Replay rules
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-300">
+              {historical.methodology.freezeRule}
+            </p>
+            <p className="mt-2 text-xs leading-5 text-slate-400">
+              {historical.methodology.holdoutRule}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 border-t border-sky-100/10 bg-[#071a28]/35 px-5 py-4 lg:grid-cols-2">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500">
+            Highest-confidence misses to review
+          </p>
+          <div className="mt-2 space-y-2">
+            {historical.worstMisses.slice(0, 3).map((miss) => (
+              <div
+                key={miss.gameId}
+                className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 rounded-lg border border-sky-100/8 bg-[#0b2030]/70 px-3 py-2 text-xs"
+              >
+                <span className="font-semibold text-slate-200">
+                  {miss.season} · {miss.away} at {miss.home}
+                </span>
+                <span className="text-slate-400">
+                  Called {miss.predictedWinner} at{' '}
+                  {formatPercent(miss.pickProbability)} · won by {miss.winner}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <details className="rounded-xl border border-[#e9b949]/20 bg-[#e9b949]/[.05] px-4 py-3 text-sm">
+          <summary className="cursor-pointer font-semibold text-[#f6d787]">
+            Method and data limits
+          </summary>
+          <ul className="mt-3 space-y-2 pl-5 text-xs leading-5 text-slate-300">
+            {historical.limitations.map((limitation) => (
+              <li key={limitation}>{limitation}</li>
+            ))}
+          </ul>
+        </details>
+      </div>
+    </section>
+  );
+}
+function HistoricalMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="px-4 py-3">
+      <p className="text-[10px] font-bold uppercase tracking-[.13em] text-slate-500">
+        {label}
+      </p>
+      <p className="mt-1 text-lg font-bold text-white">{value}</p>
+      <p className="mt-0.5 text-xs text-slate-400">{detail}</p>
+    </div>
   );
 }
 function LearningPanel({ learning }: { learning: Learning }) {
