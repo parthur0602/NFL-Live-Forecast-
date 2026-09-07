@@ -76,8 +76,8 @@ export function ForecastDesk() {
   const changeWeek = useCallback(async (nextWeek: number) => {
     if (nextWeek < 1 || nextWeek > 18) throw new Error('Week must be from 1 through 18.');
     setWeek(nextWeek); setBusy(true);
-    try { await loadForecast(nextWeek); } catch (error) { setForecastError(error instanceof Error ? error.message : 'Could not refresh the forecast.'); throw error; } finally { setBusy(false); }
-  }, [loadForecast]);
+    try { try { await refreshLearning(); } catch (error) { setLearningError(error instanceof Error ? error.message : 'Could not refresh the learning record.'); } await loadForecast(nextWeek); } catch (error) { setForecastError(error instanceof Error ? error.message : 'Could not refresh the forecast.'); throw error; } finally { setBusy(false); }
+  }, [loadForecast, refreshLearning]);
   useEffect(() => { const initialRefresh = window.setTimeout(() => { void refreshAll(1); }, 0); return () => window.clearTimeout(initialRefresh); }, [refreshAll]);
   useEffect(() => { const timer = window.setInterval(() => { void refreshAll(stateRef.current.week); }, 5 * 60 * 1000); return () => window.clearInterval(timer); }, [refreshAll]);
 

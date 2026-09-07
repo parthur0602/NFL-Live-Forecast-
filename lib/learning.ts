@@ -141,7 +141,12 @@ export async function modelState(): Promise<LearnedModelState> {
 export async function capturePredictions(items: Array<{ week: number; gameKey: string; away: string; home: string; predictedWinner: string; homeProbability: number; favoriteProbability: number; liveDelta: number }>) {
   const database = db();
   const now = new Date().toISOString();
-  const statements = items.slice(0, 18).map((item) => database.prepare(`INSERT OR IGNORE INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, favorite_probability, live_delta, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  const candidates = items.slice(0, 18);
+  const completed = new Set<string>();
+  for (const week of [...new Set(candidates.map((item) => item.week))]) {
+    for (const result of await resultsForWeek(week)) completed.add(`${result.away}__${result.home}`);
+  }
+  const statements = candidates.filter((item) => !completed.has(item.gameKey)).map((item) => database.prepare(`INSERT OR IGNORE INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, favorite_probability, live_delta, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(SEASON, item.week, item.gameKey, item.away, item.home, item.predictedWinner, item.homeProbability, item.favoriteProbability, item.liveDelta, now));
   if (statements.length) await database.batch(statements);
   const captured = await database.prepare(`SELECT COUNT(*) AS count FROM prediction_snapshots WHERE season = ?`).bind(SEASON).first<{ count: number }>();
