@@ -61,11 +61,14 @@ export default defineConfig(async () => {
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
-    server: isLocalNodeRuntime
-      ? { host: true, allowedHosts: true }
-      : isCodexSeatbeltSandbox
+    server: {
+      ...(isLocalNodeRuntime
+        ? { host: true, allowedHosts: true as const }
+        : {}),
+      ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
-        : undefined,
+        : {}),
+    },
     resolve: isLocalNodeRuntime
       ? { alias: { 'cloudflare:workers': localCloudflareWorkersModule } }
       : undefined,
