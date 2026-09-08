@@ -332,14 +332,22 @@ for (const game of games) {
   gameRows.set(game.gameId, { ...game, y: game.homeScore > game.awayScore ? 1 : 0, homeStats: gameTeamRow(homePair, game.away, game), awayStats: gameTeamRow(awayPair, game.home, game) });
 }
 
-const allMetricValues = {}; for (const name of FEATURE_NAMES) allMetricValues[name] = [];
 const histories = new Map();
 for (const game of games) {
   const row = gameRows.get(game.gameId); if (!row) continue;
   for (const [team, stats, opponent] of [[game.home, row.homeStats, game.away], [game.away, row.awayStats, game.home]]) { if (!histories.has(team)) histories.set(team, []); histories.get(team).push({ ...stats, season: game.season, week: game.week, targetSeason: game.season, opponent, gameId: game.gameId }); }
 }
-const SUMMARY_MEAN_KEYS = ['passingEpa', 'rushingEpa', 'success', 'earlyDownEpa', 'explosivePass', 'explosiveRush', 'redZoneTdRate', 'thirdDownRate', 'fourthDownRate', 'sackRateAllowed', 'interceptionRate', 'qbEpa', 'qbCompletion', 'epaAllowed', 'passEpaAllowed', 'rushEpaAllowed', 'successAllowed', 'explosiveAllowed', 'defRedZoneTdRate'];
-const leagueMean = Object.fromEntries(SUMMARY_MEAN_KEYS.map((name) => [name, 0]));
+// These priors are fixed before the replay. They are deliberately not
+// estimated from the full historical file, which would make early-season
+// shrinkage see future games. EPA-like metrics center at zero; rates use
+// neutral league priors.
+const leagueMean = {
+  passingEpa: 0, rushingEpa: 0, success: 0.5, earlyDownEpa: 0, explosivePass: 0.08,
+  explosiveRush: 0.06, redZoneTdRate: 0.5, thirdDownRate: 0.4, fourthDownRate: 0.5,
+  sackRateAllowed: 0.07, interceptionRate: 0.025, qbEpa: 0, qbCompletion: 0.65,
+  epaAllowed: 0, passEpaAllowed: 0, rushEpaAllowed: 0, successAllowed: 0.5,
+  explosiveAllowed: 0.07, defRedZoneTdRate: 0.5,
+};
 const featureRows = [];
 for (const game of games) {
   const row = gameRows.get(game.gameId); if (!row) continue;
@@ -348,12 +356,8 @@ for (const game of games) {
   const home = teamSummary(homePrior, 'all_equal', 0, 0, leagueMean); const away = teamSummary(awayPrior, 'all_equal', 0, 0, leagueMean);
   if (!home || !away) continue;
   const base = difference(home, away); if (Object.values(base).some((value) => value === null || !Number.isFinite(value))) continue;
-  const x = FEATURE_NAMES.map((name) => base[name]); x.forEach((value, index) => allMetricValues[FEATURE_NAMES[index]].push(value));
+  const x = FEATURE_NAMES.map((name) => base[name]);
   featureRows.push({ ...row, x, homePriorGames: home.games, awayPriorGames: away.games });
-}
-for (const name of FEATURE_NAMES) {
-  const summaryName = name.replace('Diff', '').replace('defense', 'defense');
-  if (summaryName in leagueMean) leagueMean[summaryName] = mean(allMetricValues[name]) ?? 0;
 }
 
 // Build every predeclared feature treatment from the same frozen prior-game
