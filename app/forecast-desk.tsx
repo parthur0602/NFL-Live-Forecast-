@@ -33,6 +33,7 @@ import {
   v2ExpectedHomeMargin,
   v2HomeProbability,
 } from '@/lib/model-v2';
+import { LiveDashboard } from '@/app/live-dashboard';
 
 type Game = {
   id: string;
@@ -497,7 +498,11 @@ function spreadSelectionFor(game: RenderedGame) {
   )}`;
 }
 
-export function ForecastDesk() {
+function ExistingForecastDesk({
+  onControlCenter,
+}: {
+  onControlCenter: () => void;
+}) {
   const [week, setWeek] = useState(1);
   const [forecast, setForecast] = useState<Forecast | null>(null);
   const [live, setLive] = useState<Live | null>(null);
@@ -910,6 +915,14 @@ export function ForecastDesk() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onControlCenter}
+              className="border-sky-100/15 bg-sky-100/5 text-slate-100 hover:bg-sky-100/10"
+            >
+              Control center
+            </Button>
             <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-100/10 bg-sky-100/5 px-3 py-1.5">
               <Radio className="size-3 text-sky-300" /> Live input scan
             </span>
@@ -2346,5 +2359,17 @@ function LoadingCards() {
         />
       ))}
     </div>
+  );
+}
+
+// The control center is the landing experience. The established analysis desk
+// remains available intact so its forecast, market, historical, learning, and
+// betting workflows are preserved while the live view is reorganized.
+export function ForecastDesk() {
+  const [view, setView] = useState<'control' | 'analysis'>('control');
+  return view === 'analysis' ? (
+    <ExistingForecastDesk onControlCenter={() => setView('control')} />
+  ) : (
+    <LiveDashboard onOpenLegacy={() => setView('analysis')} />
   );
 }

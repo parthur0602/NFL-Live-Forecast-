@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server';
 import { env } from 'cloudflare:workers';
 import { learnedProbability } from '@/lib/forecast';
-import { safeModelState } from '@/lib/learning';
+import { safeModelState, saveMarketSnapshots } from '@/lib/learning';
 import {
   fetchMarketLines,
   MARKET_SOURCE_LABEL,
 } from '@/lib/market';
-import { MODEL_V2, v2HomeProbability } from '@/lib/model-v2';
+import {
+  impliedProbability,
+  MODEL_V2,
+  spreadProbabilities,
+  v2ExpectedHomeMargin,
+  v2HomeProbability,
+} from '@/lib/model-v2';
 import {
   captureHorizon,
   captureProspectiveRows,
@@ -95,6 +101,13 @@ export async function GET(request: Request) {
     ]);
     const capturedAt = new Date().toISOString();
     const byGame = new Map(lines.map((line) => [line.gameKey, line]));
+    const marketForSlate = games.flatMap((game) => {
+      const line = byGame.get(game.gameKey);
+      return line
+        ? [{ ...line, source: MARKET_SOURCE_LABEL, observedAt: capturedAt }]
+        : [];
+    });
+    await saveMarketSnapshots(marketForSlate);
     const pairs: ProspectiveCaptureInput[] = games.map((game) => {
       const market = byGame.get(game.gameKey) ?? null;
       const marketHomeProbability = market?.homeImpliedProbability ?? null;
@@ -183,6 +196,43 @@ export async function GET(request: Request) {
           v5UnavailableReason: pair.v5Available
             ? null
             : (pair.v5FeaturePayload.unavailableReason ?? null),
+          market: (() => {
+            const line = byGame.get(pair.gameKey);
+            if (!line) return null;
+            const expectedHomeMargin = v2ExpectedHomeMargin(0, line.homeSpread);
+            const cover = spreadProbabilities(expectedHomeMargin, line.homeSpread);
+            const homePrice = impliedProbability(line.homeSpreadOdds);
+            const awayPrice = impliedProbability(line.awaySpreadOdds);
+            const homeEdge =
+              cover === null || homePrice === null ? null : cover.homeCover - homePrice;
+            const awayEdge =
+              cover === null || awayPrice === null ? null : cover.awayCover - awayPrice;
+            const selection =
+              homeEdge !== null && awayEdge !== null && Math.max(homeEdge, awayEdge) > 0
+                ? homeEdge >= awayEdge
+                  ? `${pair.homeTeam} ${line.homeSpread ?? ''}`.trim()
+                  : `${pair.awayTeam} ${line.awaySpread ?? ''}`.trim()
+                : 'Pass — no price edge';
+            return {
+              awayMoneyline: line.awayMoneyline,
+              homeMoneyline: line.homeMoneyline,
+              awaySpread: line.awaySpread,
+              homeSpread: line.homeSpread,
+              totalLine: line.totalLine,
+              awaySpreadOdds: line.awaySpreadOdds,
+              homeSpreadOdds: line.homeSpreadOdds,
+              awayImpliedProbability: line.awayImpliedProbability,
+              homeImpliedProbability: line.homeImpliedProbability,
+              expectedHomeMargin,
+              spreadProbabilities: cover,
+              betting: {
+                selection,
+                homeEdge,
+                awayEdge,
+                policy: MODEL_V2.decisionRule,
+              },
+            };
+          })(),
           label: V5_SHADOW_LABEL,
         })),
       },
