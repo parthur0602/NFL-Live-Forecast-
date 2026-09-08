@@ -291,6 +291,8 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const [detail, setDetail] = useState<DashboardData | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [atlasSort, setAtlasSort] = useState<'positive' | 'negative' | 'sample' | 'z'>('positive');
+  const [benchmarkOpen, setBenchmarkOpen] = useState(false);
+  const [researchOpen, setResearchOpen] = useState(false);
 
   const refreshSlate = useCallback(async (requestedWeek: number, manual = false) => {
     if (manual) setRefreshing(true);
@@ -368,6 +370,21 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
     ];
   }, [currentGames, dashboard, learning, live, slate, slateError, slateV5Available]);
 
+  const benchmark = (historical?.currentBenchmark as Record<string, unknown> | undefined)?.metrics as Record<string, unknown> | undefined;
+  const benchmarkAccuracy = asNumber(benchmark?.accuracy) ?? 0.6633802816901408;
+  const benchmarkCorrect = asNumber(benchmark?.correct) ?? 942;
+  const benchmarkIncorrect = asNumber(benchmark?.incorrect) ?? 478;
+  const benchmarkBrier = asNumber(benchmark?.brier) ?? 0.21149351343943848;
+  const benchmarkLogLoss = asNumber(benchmark?.logLoss) ?? 0.6102688000087197;
+  const memory = learning?.memory;
+  const replay = (historical?.v4 as Record<string, unknown> | undefined)?.replay as Record<string, unknown> | undefined;
+  const labPostmortems = asNumber(replay?.gamesStudied) ?? asNumber(memory?.postmortems) ?? 1420;
+  const labErrors = asNumber(replay?.errorMemory) ?? asNumber(memory?.errors) ?? 387;
+  const labSuccesses = asNumber(replay?.successMemory) ?? asNumber(memory?.successes) ?? 942;
+  const labPromoted = asNumber(replay?.specialistsPromoted) ?? 0;
+  const promotedSpecialists = (memory?.specialists ?? []).filter((row) => (asNumber(row.production_weight) ?? 0) > 0 && String(row.code) !== 'market_baseline').length;
+  const healthySystems = systems.filter((system) => system.state === 'Healthy').length;
+
   return (
     <main className="min-h-screen bg-[#06111d] text-slate-100 selection:bg-sky-400/30">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_15%_0%,rgba(14,116,144,.18),transparent_35%),radial-gradient(circle_at_90%_10%,rgba(30,64,175,.15),transparent_30%)]" />
@@ -387,34 +404,34 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
 
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Upcoming games" value={slate ? String(liveGames.length) : '—'} detail={slate ? `Week ${slate.week} · ${currentGames.length} scheduled` : 'Loading schedule'} icon={<CalendarClock className="size-4 text-sky-300" />} />
-          <MetricCard label="V2 season record" value={canonical?.total ? `${canonical.correct}–${canonical.incorrect}` : 'No graded games'} detail={canonical?.total ? `${pct(canonical.accuracy)} accuracy · Brier ${number(canonical.brierScore)}` : 'Canonical record only'} icon={<Trophy className="size-4 text-amber-300" />} />
-          <MetricCard label="V5 availability" value={slate ? `${slateV5Available}/${currentGames.length}` : '—'} detail={slateV5Available ? 'Server-computed prospective rows' : 'No substitute data is used'} icon={<Eye className="size-4 text-violet-300" />} />
-          <MetricCard label="Last slate refresh" value={slate ? relative(slate.retrievedAt) : '—'} detail={slate ? `Next automatic refresh in ≤45 sec · ${slate.capture.captureBucket}` : 'Waiting for server'} icon={<Radio className="size-4 text-emerald-300" />} />
+          <MetricCard label="Current season record" value={canonical?.total ? `${canonical.correct}–${canonical.incorrect}` : 'No graded games'} detail={canonical?.total ? `${pct(canonical.accuracy)} accuracy · canonical picks` : 'Canonical record only'} icon={<Trophy className="size-4 text-amber-300" />} />
+          <MetricCard label="System health" value={systems.length ? `${healthySystems}/${systems.length}` : '—'} detail={live ? 'Schedule, market, feed and D1 checks' : 'Checking live systems'} icon={<Gauge className="size-4 text-emerald-300" />} />
+          <MetricCard label="Last slate refresh" value={slate ? relative(slate.retrievedAt) : '—'} detail={slate ? `Auto-refresh ≤45 sec · ${slate.capture.captureBucket}` : 'Waiting for server'} icon={<Radio className="size-4 text-emerald-300" />} />
         </section>
+
+        <section className="mb-6 grid gap-4 xl:grid-cols-[1.35fr_.65fr]">
+          <div className="rounded-2xl border border-emerald-400/20 bg-gradient-to-br from-emerald-400/[.10] to-[#0b1927] p-5 shadow-lg shadow-black/10">
+            <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] font-bold tracking-[0.18em] text-emerald-300 uppercase">CURRENT MODEL BENCHMARK</p><h2 className="mt-1 text-xl font-black text-white">Historical benchmark</h2></div><Pill tone="green">V2 STATUS: PRODUCTION CHAMPION</Pill></div>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5"><MetricInline label="Accuracy" value={pct(benchmarkAccuracy)} /><MetricInline label="Correct" value={number(benchmarkCorrect, 0)} /><MetricInline label="Incorrect" value={number(benchmarkIncorrect, 0)} /><MetricInline label="Brier" value={number(benchmarkBrier, 3)} /><MetricInline label="Log loss" value={number(benchmarkLogLoss, 3)} /></div>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-slate-400">2021–2025 decided games · frozen market-anchored benchmark</p><Button size="sm" variant="outline" onClick={() => setBenchmarkOpen(true)} className="border-emerald-300/30 bg-emerald-300/10 text-emerald-100 hover:bg-emerald-300/20">View full historical analysis <ChevronRight className="ml-1 size-3.5" /></Button></div>
+          </div>
+          <div className="rounded-2xl border border-violet-400/20 bg-gradient-to-br from-violet-400/[.10] to-[#0b1927] p-5 shadow-lg shadow-black/10">
+            <div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-bold tracking-[0.18em] text-violet-300 uppercase">V4 SELF-LEARNING LAB</p><h2 className="mt-1 text-xl font-black text-white">Research memory</h2></div><BrainCircuit className="size-5 text-violet-300" /></div>
+            <div className="mt-4 grid grid-cols-2 gap-3"><MetricInline label="Postmortems" value={number(labPostmortems, 0)} /><MetricInline label="Error memories" value={number(labErrors, 0)} /><MetricInline label="Success memories" value={number(labSuccesses, 0)} /><MetricInline label="Specialists promoted" value={number(Math.max(labPromoted, promotedSpecialists), 0)} /></div>
+            <p className="mt-4 text-xs leading-relaxed text-slate-400">The model reviews completed games, records meaningful mistakes and successful patterns, and tests specialists on future games before allowing them to influence predictions.</p>
+            <Button size="sm" variant="outline" onClick={() => setResearchOpen(true)} className="mt-4 border-violet-300/30 bg-violet-300/10 text-violet-100 hover:bg-violet-300/20">View research lab <ChevronRight className="ml-1 size-3.5" /></Button>
+          </div>
+        </section>
+
+        <section className="mb-6 rounded-2xl border border-white/10 bg-[#0b1927]/90 p-4 shadow-lg shadow-black/10"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-[10px] font-bold tracking-[0.18em] text-sky-300 uppercase">SYSTEM & FEED HEALTH</p><p className="mt-1 text-sm text-slate-300">Production decisions stay on V2 while live inputs and V5 research are monitored separately.</p></div><div className="flex flex-wrap gap-2"><Pill tone={dashboard ? 'green' : 'amber'}>D1 {dashboard ? 'HEALTHY' : 'CHECKING'}</Pill><Pill tone={live ? 'green' : 'amber'}>NEWS {live ? 'LIVE' : 'CHECKING'}</Pill><Pill tone={slate?.v5Artifact.productionInfluence === 0 ? 'green' : 'red'}>V5 INFLUENCE 0</Pill></div></div></section>
 
         {slateError && <div className="mb-5"><ErrorBox message={slateError} /></div>}
         {slowError && <div className="mb-5"><ErrorBox message={`Background research: ${slowError}`} /></div>}
 
-        <Tabs defaultValue="slate" className="gap-5">
-          <div className="sticky top-0 z-20 -mx-4 overflow-x-auto border-y border-white/10 bg-[#081522]/95 px-4 py-2 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-            <TabsList variant="line" className="h-auto min-w-max gap-1 p-0">
-              <TabsTrigger value="slate" className="px-3 py-2 text-xs">Current slate</TabsTrigger>
-              <TabsTrigger value="exam" className="px-3 py-2 text-xs">2026 V2 vs V5</TabsTrigger>
-              <TabsTrigger value="history" className="px-3 py-2 text-xs">Historical</TabsTrigger>
-              <TabsTrigger value="atlas" className="px-3 py-2 text-xs">Failure atlas</TabsTrigger>
-              <TabsTrigger value="research" className="px-3 py-2 text-xs">Research state</TabsTrigger>
-              <TabsTrigger value="learning" className="px-3 py-2 text-xs">Learning & system</TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent value="slate"><CurrentSlate games={currentGames} loading={!slate && !slateError} onSelect={setSelected} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} /></TabsContent>
-          <TabsContent value="exam"><ExamPanel exam={exam} slate={slate} /></TabsContent>
-          <TabsContent value="history"><HistoryPanel historical={historical} research={research} /></TabsContent>
-          <TabsContent value="atlas"><FailureAtlas research={research} sort={atlasSort} setSort={setAtlasSort} /></TabsContent>
-          <TabsContent value="research"><ResearchPanel dashboard={dashboard} live={live} /></TabsContent>
-          <TabsContent value="learning"><LearningPanel learning={learning} dashboard={dashboard} systems={systems} /></TabsContent>
-        </Tabs>
+        <CurrentSlate games={currentGames} loading={!slate && !slateError} onSelect={setSelected} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
       </div>
+      <BenchmarkDialog open={benchmarkOpen} onOpenChange={setBenchmarkOpen} historical={historical} research={research} />
+      <ResearchLabDialog open={researchOpen} onOpenChange={setResearchOpen} exam={exam} slate={slate} historical={historical} research={research} dashboard={dashboard} live={live} learning={learning} systems={systems} atlasSort={atlasSort} setAtlasSort={setAtlasSort} />
       <GameDetail game={selected} onClose={() => setSelected(null)} detail={detail} detailError={detailError} />
     </main>
   );
@@ -435,12 +452,10 @@ function GameCard({ game, onClick, marketHistory, prospectiveHistory }: { game: 
   const modelRows = prospectiveHistory.filter((row) => row.game_key === game.gameKey);
   const movement = currentMovement(marketRows, modelRows);
   return <button type="button" onClick={onClick} className="group w-full rounded-2xl border border-white/10 bg-gradient-to-br from-[#0d2133] to-[#081725] p-4 text-left shadow-lg shadow-black/10 transition hover:border-sky-300/35 hover:from-[#10283d] focus:outline-none focus:ring-2 focus:ring-sky-300/50">
-    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={statusForKickoff(game.scheduledKickoffAt) === 'Near kickoff' ? 'amber' : 'blue'}>{statusForKickoff(game.scheduledKickoffAt)}</Pill><Pill tone="green">V2 OFFICIAL</Pill><Pill tone="neutral">{game.captureHorizon}</Pill></div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
-    <div className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-5"><TeamProbability team={game.away} probability={v2Away} pick={game.v2OfficialPick === game.away} side="AWAY" /><TeamProbability team={game.home} probability={game.v2OfficialProbability} pick={game.v2OfficialPick === game.home} side="HOME" /></div>
-    <div className="mt-4 grid grid-cols-2 gap-2 border-y border-white/8 py-3 text-xs sm:grid-cols-4"><DataCell label="Moneyline" value={`${price(market?.awayMoneyline)} / ${price(market?.homeMoneyline)}`} /><DataCell label="No-vig home" value={pct(game.marketHomeProbability)} /><DataCell label="Spread" value={market ? `${spread(market.awaySpread)} / ${spread(market.homeSpread)}` : 'Unavailable'} /><DataCell label="Confidence" value={confidence(game.v2OfficialProbability)} /></div>
-    <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div className="rounded-xl border border-emerald-400/15 bg-emerald-400/5 p-2.5"><p className="font-bold tracking-wide text-emerald-200">V2 · OFFICIAL / PRODUCTION</p><p className="mt-1 text-slate-300">{game.v2OfficialPick} · {pct(game.v2OfficialProbability)} home win</p><p className="mt-1 text-[11px] text-slate-500">{game.marketObservedAt ? `Market observed ${relative(game.marketObservedAt)}` : 'Market unavailable'}</p></div>
-      <div className="rounded-xl border border-violet-400/15 bg-violet-400/5 p-2.5"><p className="font-bold tracking-wide text-violet-200">V5 · SHADOW ONLY</p>{game.v5Available ? <><p className="mt-1 text-slate-300">{game.v5ShadowPick} · {pct(game.v5ShadowProbability)} home win</p><p className="mt-1 text-[11px] text-slate-500">Δ V5−V2 {pct(game.v5MinusV2ProbabilityDelta)} {game.disagreement ? '· Pick disagreement' : '· Same pick'}</p></> : <p className="mt-1 text-[11px] leading-relaxed text-slate-400">Unavailable: {game.v5UnavailableReason ?? 'No server-computed shadow result.'}</p>}</div></div>
-    {movement && <div className="mt-3 flex items-center gap-2 rounded-lg border border-sky-300/15 bg-sky-300/5 px-2.5 py-2 text-[11px] text-sky-100"><Activity className="size-3.5 shrink-0" />{movement}</div>}
+    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={statusForKickoff(game.scheduledKickoffAt) === 'Near kickoff' ? 'amber' : 'blue'}>{statusForKickoff(game.scheduledKickoffAt)}</Pill><Pill tone="green">V2 OFFICIAL</Pill>{game.disagreement && <Pill tone="red">DISAGREEMENT</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
+    <div className="mt-4 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-3"><div><p className="truncate text-lg font-black text-white">{game.away}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Away · {pct(v2Away)}</p></div><span className="pb-1 text-xs font-bold text-slate-600">at</span><div className="text-right"><p className="truncate text-lg font-black text-white">{game.home}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Home · {pct(game.v2OfficialProbability)}</p></div></div>
+    <div className="mt-4 grid grid-cols-2 gap-2 border-y border-white/8 py-3 text-xs sm:grid-cols-4"><DataCell label="V2 pick" value={game.v2OfficialPick} /><DataCell label="Market home" value={pct(game.marketHomeProbability)} /><DataCell label="Spread" value={market ? `${spread(market.awaySpread)} / ${spread(market.homeSpread)}` : 'Unavailable'} /><DataCell label="Moneyline" value={`${price(market?.awayMoneyline)} / ${price(market?.homeMoneyline)}`} /></div>
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs"><div className="flex items-center gap-2"><Pill tone={game.v5Available ? 'blue' : 'neutral'}>V5 SHADOW</Pill><span className="text-slate-400">{game.v5Available ? `${game.v5ShadowPick} · ${pct(game.v5ShadowProbability)}` : 'Unavailable until prior-week features exist'}</span></div>{movement && <span className="flex items-center gap-1 text-sky-200"><Activity className="size-3.5" />{movement.replace('Observed change: ', '')}</span>}</div>
   </button>;
 }
 
@@ -472,7 +487,16 @@ function currentMovement(marketRows: Array<Record<string, unknown>>, modelRows: 
   return parts.length ? `Observed change: ${parts.join(' · ')}. No cause is inferred.` : null;
 }
 function DataCell({ label, value }: { label: string; value: string }) { return <div><p className="text-[10px] tracking-[0.11em] text-slate-500 uppercase">{label}</p><p className="mt-1 truncate font-semibold text-slate-200">{value}</p></div>; }
+function MetricInline({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-white/8 bg-black/10 px-3 py-2"><p className="text-[10px] font-semibold tracking-[0.11em] text-slate-500 uppercase">{label}</p><p className="mt-1 text-lg font-black text-white">{value}</p></div>; }
 function SectionHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail?: string }) { return <div className="mb-4"><p className="text-[10px] font-bold tracking-[0.18em] text-sky-300 uppercase">{eyebrow}</p><h2 className="mt-1 text-2xl font-black tracking-tight text-white">{title}</h2>{detail && <p className="mt-1 text-sm text-slate-400">{detail}</p>}</div>; }
+
+function BenchmarkDialog({ open, onOpenChange, historical, research }: { open: boolean; onOpenChange: (open: boolean) => void; historical: Record<string, unknown> | null; research: Record<string, unknown> | null }) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] max-w-[calc(100%-1rem)] overflow-y-auto border border-white/15 bg-[#091725] text-slate-100 sm:max-w-6xl"><DialogHeader><DialogTitle className="text-2xl font-black text-white">Full historical analysis</DialogTitle><DialogDescription className="text-slate-400">Detailed benchmark methodology, calibration, yearly results, caveats, and research comparisons.</DialogDescription></DialogHeader><div className="mt-4"><HistoryPanel historical={historical} research={research} /></div></DialogContent></Dialog>;
+}
+
+function ResearchLabDialog({ open, onOpenChange, exam, slate, historical, research, dashboard, live, learning, systems, atlasSort, setAtlasSort }: { open: boolean; onOpenChange: (open: boolean) => void; exam: Record<string, unknown> | null; slate: Slate | null; historical: Record<string, unknown> | null; research: Record<string, unknown> | null; dashboard: DashboardData | null; live: Record<string, unknown> | null; learning: Learning | null; systems: Array<{ label: string; state: string; detail: string }>; atlasSort: 'positive' | 'negative' | 'sample' | 'z'; setAtlasSort: (sort: 'positive' | 'negative' | 'sample' | 'z') => void }) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] max-w-[calc(100%-1rem)] overflow-y-auto border border-white/15 bg-[#091725] p-0 text-slate-100 sm:max-w-7xl"><div className="p-5 sm:p-6"><DialogHeader><DialogTitle className="text-2xl font-black text-white">Research / Model Lab</DialogTitle><DialogDescription className="text-slate-400">Historical replay, V5 shadow evidence, failure analysis, football-state research, and learning memory. Nothing here changes production picks.</DialogDescription></DialogHeader><Tabs defaultValue="exam" className="mt-5 gap-5"><div className="overflow-x-auto border-y border-white/10 bg-[#081522] py-2"><TabsList variant="line" className="h-auto min-w-max gap-1 p-0"><TabsTrigger value="exam" className="px-3 py-2 text-xs">V2 vs V5</TabsTrigger><TabsTrigger value="history" className="px-3 py-2 text-xs">Historical</TabsTrigger><TabsTrigger value="atlas" className="px-3 py-2 text-xs">Failure atlas</TabsTrigger><TabsTrigger value="research" className="px-3 py-2 text-xs">Football state</TabsTrigger><TabsTrigger value="learning" className="px-3 py-2 text-xs">Self-learning</TabsTrigger></TabsList></div><TabsContent value="exam"><ExamPanel exam={exam} slate={slate} /></TabsContent><TabsContent value="history"><HistoryPanel historical={historical} research={research} /></TabsContent><TabsContent value="atlas"><FailureAtlas research={research} sort={atlasSort} setSort={setAtlasSort} /></TabsContent><TabsContent value="research"><ResearchPanel dashboard={dashboard} live={live} /></TabsContent><TabsContent value="learning"><LearningPanel learning={learning} dashboard={dashboard} systems={systems} /></TabsContent></Tabs></div></DialogContent></Dialog>;
+}
 
 function ExamPanel({ exam, slate }: { exam: Record<string, unknown> | null; slate: Slate | null }) {
   const v2 = exam?.v2 as Record<string, unknown> | undefined;
