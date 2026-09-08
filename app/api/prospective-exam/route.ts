@@ -199,8 +199,16 @@ export async function GET(request: Request) {
           market: (() => {
             const line = byGame.get(pair.gameKey);
             if (!line) return null;
-            const expectedHomeMargin = v2ExpectedHomeMargin(0, line.homeSpread);
-            const cover = spreadProbabilities(expectedHomeMargin, line.homeSpread);
+            // Without a listed spread there is no authoritative market-margin
+            // estimate to display. Do not substitute a made-up zero margin.
+            const expectedHomeMargin =
+              line.homeSpread === null
+                ? null
+                : v2ExpectedHomeMargin(0, line.homeSpread);
+            const cover =
+              expectedHomeMargin === null
+                ? null
+                : spreadProbabilities(expectedHomeMargin, line.homeSpread);
             const homePrice = impliedProbability(line.homeSpreadOdds);
             const awayPrice = impliedProbability(line.awaySpreadOdds);
             const homeEdge =
