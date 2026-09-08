@@ -15,6 +15,7 @@
     "failure:atlas": "node scripts/build-failure-atlas.mjs",
     "shadow:residual": "node scripts/build-shadow-residual-backtest.mjs",
     "residual:robustness": "node scripts/build-residual-robustness.mjs",
+    "historical:v6": "node scripts/build-historical-v6.mjs",
     "v5:artifact": "node scripts/build-v5-prospective-artifact.mjs",
     "test:prospective-shadow": "node scripts/test-prospective-shadow.mjs",
     "typecheck": "tsc --noEmit",
