@@ -63,7 +63,10 @@ export default defineConfig(async () => {
     css: { postcss: { plugins: [tailwindcss()] } },
     server: {
       ...(isLocalNodeRuntime
-        ? { host: true, allowedHosts: true as const }
+        // The temporary HTTPS forwarding used for a browser preview does not
+        // proxy Vite's HMR socket reliably.  Turn HMR off in this local-only
+        // Node path so a healthy preview cannot be covered by a dev overlay.
+        ? { host: true, allowedHosts: true as const, hmr: false }
         : {}),
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
