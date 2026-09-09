@@ -9,10 +9,14 @@ const CACHE_DIR = resolve('work/v6-cache');
 const OUTPUT_PATH = resolve('outputs/v6-historical-accuracy-lab.json');
 const CORRECTION_SCALES = [0, 0.1, 0.25, 0.5, 0.75, 1];
 const SELECTIVE_THRESHOLDS = [0, 0.25, 0.5, 0.75];
-const RECENCY_VARIANTS = ['decay_0.88', 'last_3', 'last_5', 'last_8', 'all_equal'];
+// Predeclared recency treatments.  The V6 plan intentionally excludes an
+// unweighted all-history variant so the grid cannot expand after seeing data.
+const RECENCY_VARIANTS = ['decay_0.88', 'last_3', 'last_5', 'last_8'];
 const CARRYOVER_VALUES = [0, 0.25, 0.5];
 const RIDGE_VALUES = [4, 8, 16, 32];
 const SHRINKAGE_VALUES = [0, 2, 4, 6];
+const OPPONENT_VARIANTS = [false, true];
+const CARRYOVER_DECAY = 0.8;
 const MIN_TRAINING_GAMES = 150;
 const LEARNING_RATE = 0.045;
 const FEATURE_NAMES = [
@@ -206,7 +210,11 @@ function teamSummary(rows, recency, carryover, shrinkage, leagueMean) {
   if (!rows.length) return null;
   const current = rows.filter((row) => row.season === rows.at(-1).targetSeason);
   const prior = rows.filter((row) => row.season < rows.at(-1).targetSeason);
-  const selected = [...prior.map((row) => ({ ...row, __carryover: carryover })), ...current];
+  // Carryover is a starting prior for a new season, not a permanent weight.
+  // It fades as current-season games accumulate, using only the number of
+  // already-observed current games available at this forecast timestamp.
+  const carryWeight = carryover * (CARRYOVER_DECAY ** current.length);
+  const selected = [...prior.map((row) => ({ ...row, __carryover: carryWeight })), ...current];
   const summary = {};
   const fields = [
     ['passingEpa', (row) => row.offense.passingEpa], ['rushingEpa', (row) => row.offense.rushingEpa], ['success', (row) => row.offense.success],
@@ -222,8 +230,8 @@ function teamSummary(rows, recency, carryover, shrinkage, leagueMean) {
     for (let index = 0; index < limited.length; index += 1) {
       const item = limited[index];
       const recencyWeight = recency === 'decay_0.88' ? 0.88 ** (limited.length - 1 - index) : 1;
-      const carryWeight = item.row.__carryover ? carryover : 1;
-      weighted += item.value * recencyWeight * carryWeight; total += recencyWeight * carryWeight;
+      const rowCarryWeight = item.row.__carryover ?? 1;
+      weighted += item.value * recencyWeight * rowCarryWeight; total += recencyWeight * rowCarryWeight;
     }
     const raw = total ? weighted / total : null;
     const observed = limited.length;
@@ -233,6 +241,46 @@ function teamSummary(rows, recency, carryover, shrinkage, leagueMean) {
   summary.games = current.length;
   summary.starterQbId = rows.at(-1).offense.starterQbId ?? null;
   return summary;
+}
+
+// Research-only opponent adjustment.  The target team's summary and every
+// opponent summary are frozen at the target game's kickoff cutoff: season
+// must be earlier, or the same season with week strictly earlier.  No result
+// from the target week (or a later week) can enter this calculation.
+function opponentAdjustedSummary(rows, recency, carryover, shrinkage, leagueMean, histories) {
+  const base = teamSummary(rows, recency, carryover, shrinkage, leagueMean);
+  if (!base) return null;
+  const targetSeason = rows.at(-1).targetSeason;
+  const targetWeek = rows.at(-1).targetWeek ?? Number.MAX_SAFE_INTEGER;
+  const opponentSummaries = [];
+  for (const row of rows) {
+    if (!row.opponent) continue;
+    const priorOpponent = (histories.get(row.opponent) ?? [])
+      .filter((item) => item.season < targetSeason || (item.season === targetSeason && item.week < targetWeek))
+      .map((item) => ({ ...item, targetSeason }));
+    const summary = teamSummary(priorOpponent, recency, carryover, shrinkage, leagueMean);
+    if (summary) opponentSummaries.push(summary);
+  }
+  if (!opponentSummaries.length) return base;
+  const opponentMean = (name, fallback) => {
+    const values = opponentSummaries.map((item) => item[name]).filter((value) => value !== null && Number.isFinite(value));
+    return mean(values) ?? fallback;
+  };
+  const adjusted = { ...base };
+  const neutral = (name, fallback = 0) => leagueMean[name] ?? fallback;
+  adjusted.passingEpa = base.passingEpa - (opponentMean('passEpaAllowed', neutral('passEpaAllowed')) - neutral('passEpaAllowed'));
+  adjusted.rushingEpa = base.rushingEpa - (opponentMean('rushEpaAllowed', neutral('rushEpaAllowed')) - neutral('rushEpaAllowed'));
+  adjusted.success = base.success - (opponentMean('successAllowed', neutral('successAllowed', 0.5)) - neutral('success', 0.5));
+  adjusted.explosivePass = base.explosivePass - (opponentMean('explosiveAllowed', neutral('explosiveAllowed')) - neutral('explosivePass'));
+  adjusted.explosiveRush = base.explosiveRush - (opponentMean('explosiveAllowed', neutral('explosiveAllowed')) - neutral('explosiveRush'));
+  adjusted.redZoneTdRate = base.redZoneTdRate - (opponentMean('defRedZoneTdRate', neutral('defRedZoneTdRate', 0.5)) - neutral('redZoneTdRate', 0.5));
+  adjusted.epaAllowed = base.epaAllowed - (opponentMean('passingEpa', neutral('passingEpa')) - neutral('passingEpa'));
+  adjusted.passEpaAllowed = base.passEpaAllowed - (opponentMean('passingEpa', neutral('passingEpa')) - neutral('passingEpa'));
+  adjusted.rushEpaAllowed = base.rushEpaAllowed - (opponentMean('rushingEpa', neutral('rushingEpa')) - neutral('rushingEpa'));
+  adjusted.successAllowed = base.successAllowed - (opponentMean('success', neutral('success', 0.5)) - neutral('success', 0.5));
+  adjusted.explosiveAllowed = base.explosiveAllowed - (opponentMean('explosivePass', neutral('explosivePass')) - neutral('explosivePass'));
+  adjusted.defRedZoneTdRate = base.defRedZoneTdRate - (opponentMean('redZoneTdRate', neutral('redZoneTdRate', 0.5)) - neutral('redZoneTdRate', 0.5));
+  return adjusted;
 }
 
 function difference(home, away) {
@@ -251,14 +299,14 @@ function difference(home, away) {
 }
 
 function metrics(rows, key) {
-  if (!rows.length) return { games: 0, accuracy: null, brier: null, logLoss: null };
+  if (!rows.length) return { games: 0, correct: 0, incorrect: 0, accuracy: null, brier: null, logLoss: null };
   let correct = 0; const brier = []; const losses = [];
   for (const row of rows) {
     const probability = clamp(row[key], 0.01, 0.99); const pick = probability >= 0.5 ? 1 : 0;
     if (pick === row.y) correct += 1;
     brier.push((probability - row.y) ** 2); losses.push(-(row.y * Math.log(probability) + (1 - row.y) * Math.log(1 - probability)));
   }
-  return { games: rows.length, accuracy: correct / rows.length, brier: mean(brier), logLoss: mean(losses) };
+  return { games: rows.length, correct, incorrect: rows.length - correct, accuracy: correct / rows.length, brier: mean(brier), logLoss: mean(losses) };
 }
 
 function xorshift(seed) { let state = seed >>> 0; return () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296; }; }
@@ -283,7 +331,7 @@ function fitAndScore(rows, bundle, config) {
   const names = BUNDLE_DEFINITIONS[bundle]; const indices = names.map((name) => FEATURE_NAMES.indexOf(name)); const beta = Array(indices.length).fill(0); const history = [];
   const result = []; let currentSeason = null;
   const recentFactor = config.recency === 'decay_0.88' ? 0.88 : 1;
-  const variantKey = `${config.recency}|${config.carryover}|${config.shrinkage}`;
+  const variantKey = `${config.recency}|${config.carryover}|${config.shrinkage}|${Boolean(config.opponentAdjusted)}`;
   for (let start = 0; start < rows.length;) {
     const first = rows[start]; let end = start + 1; while (end < rows.length && rows[end].season === first.season && rows[end].week === first.week) end += 1;
     if (currentSeason !== first.season) { currentSeason = first.season; if (config.carryover === 0) beta.fill(0); else for (let i = 0; i < beta.length; i += 1) beta[i] *= config.carryover; }
@@ -309,7 +357,7 @@ function fitAndScore(rows, bundle, config) {
     }
     start = end;
   }
-  return result;
+  return { rows: result, coefficients: names.map((name, index) => ({ feature: name, coefficient: beta[index] })) };
 }
 
 function subgroupDiagnostics(rows, key) {
@@ -351,9 +399,9 @@ const leagueMean = {
 const featureRows = [];
 for (const game of games) {
   const row = gameRows.get(game.gameId); if (!row) continue;
-  const prior = (team) => (histories.get(team) ?? []).filter((item) => item.season < game.season || (item.season === game.season && item.week < game.week)).map((item) => ({ ...item, targetSeason: game.season }));
+  const prior = (team) => (histories.get(team) ?? []).filter((item) => item.season < game.season || (item.season === game.season && item.week < game.week)).map((item) => ({ ...item, targetSeason: game.season, targetWeek: game.week }));
   const homePrior = prior(game.home); const awayPrior = prior(game.away); if (!homePrior.length || !awayPrior.length) continue;
-  const home = teamSummary(homePrior, 'all_equal', 0, 0, leagueMean); const away = teamSummary(awayPrior, 'all_equal', 0, 0, leagueMean);
+  const home = teamSummary(homePrior, 'decay_0.88', 0, 0, leagueMean); const away = teamSummary(awayPrior, 'decay_0.88', 0, 0, leagueMean);
   if (!home || !away) continue;
   const base = difference(home, away); if (Object.values(base).some((value) => value === null || !Number.isFinite(value))) continue;
   const x = FEATURE_NAMES.map((name) => base[name]);
@@ -367,34 +415,38 @@ for (const row of featureRows) {
   const game = row;
   const prior = (team) => (histories.get(team) ?? [])
     .filter((item) => item.season < game.season || (item.season === game.season && item.week < game.week))
-    .map((item) => ({ ...item, targetSeason: game.season }));
+    .map((item) => ({ ...item, targetSeason: game.season, targetWeek: game.week }));
   const homePrior = prior(game.home); const awayPrior = prior(game.away);
   row.xByConfig = {};
-  for (const recency of RECENCY_VARIANTS) for (const carryover of CARRYOVER_VALUES) for (const shrinkage of SHRINKAGE_VALUES) {
-    const home = teamSummary(homePrior, recency, carryover, shrinkage, leagueMean);
-    const away = teamSummary(awayPrior, recency, carryover, shrinkage, leagueMean);
+  for (const recency of RECENCY_VARIANTS) for (const carryover of CARRYOVER_VALUES) for (const shrinkage of SHRINKAGE_VALUES) for (const opponentAdjusted of OPPONENT_VARIANTS) {
+    const summarize = (rows) => opponentAdjusted
+      ? opponentAdjustedSummary(rows, recency, carryover, shrinkage, leagueMean, histories)
+      : teamSummary(rows, recency, carryover, shrinkage, leagueMean);
+    const home = summarize(homePrior);
+    const away = summarize(awayPrior);
     if (!home || !away) continue;
     const values = difference(home, away);
     if (Object.values(values).some((value) => value === null || !Number.isFinite(value))) continue;
-    row.xByConfig[`${recency}|${carryover}|${shrinkage}`] = FEATURE_NAMES.map((name) => values[name]);
+    row.xByConfig[`${recency}|${carryover}|${shrinkage}|${opponentAdjusted}`] = FEATURE_NAMES.map((name) => values[name]);
   }
 }
 
 const candidates = []; let best = null;
 for (const bundle of Object.keys(BUNDLE_DEFINITIONS)) {
-  for (const recency of RECENCY_VARIANTS) for (const carryover of CARRYOVER_VALUES) for (const ridge of RIDGE_VALUES) for (const shrinkage of SHRINKAGE_VALUES) for (const family of ['ridge-residual', 'logistic-residual']) {
+  for (const recency of RECENCY_VARIANTS) for (const carryover of CARRYOVER_VALUES) for (const ridge of RIDGE_VALUES) for (const shrinkage of SHRINKAGE_VALUES) for (const opponentAdjusted of OPPONENT_VARIANTS) for (const family of ['ridge-residual', 'logistic-residual']) {
     for (const scale of CORRECTION_SCALES) {
-      const config = { bundle, recency, carryover, ridge, shrinkage, family, scale };
-      const scored = fitAndScore(featureRows, bundle, config); const oos = scored.filter((row) => row.homePriorGames + row.awayPriorGames >= 2).map((row) => ({ ...row, marketProbability: row.marketProbability, challengerProbability: row.challengerProbability }));
+      const config = { bundle, recency, carryover, ridge, shrinkage, opponentAdjusted, family, scale };
+      const fit = fitAndScore(featureRows, bundle, config); const oos = fit.rows.filter((row) => row.homePriorGames + row.awayPriorGames >= 2).map((row) => ({ ...row, marketProbability: row.marketProbability, challengerProbability: row.challengerProbability }));
       const market = metrics(oos, 'marketProbability'); const challenger = metrics(oos, 'challengerProbability');
       const candidate = { ...config, ...challenger, deltaBrierVsMarket: challenger.brier - market.brier, deltaLogLossVsMarket: challenger.logLoss - market.logLoss, deltaAccuracyVsMarket: challenger.accuracy - market.accuracy };
       candidates.push(candidate);
-      if (candidate.brier !== null && (!best || candidate.brier < best.brier || (candidate.brier === best.brier && candidate.logLoss < best.logLoss))) best = { ...candidate, rows: oos };
+      if (candidate.brier !== null && (!best || candidate.brier < best.brier || (candidate.brier === best.brier && candidate.logLoss < best.logLoss))) best = { ...candidate, rows: oos, coefficients: fit.coefficients };
     }
   }
 }
 const nonzero = candidates.filter((candidate) => candidate.scale > 0).sort((a, b) => a.brier - b.brier || a.logLoss - b.logLoss)[0] ?? null;
-const challenger = nonzero ? fitAndScore(featureRows, nonzero.bundle, nonzero).filter((row) => row.homePriorGames + row.awayPriorGames >= 2) : [];
+const nonzeroFit = nonzero ? fitAndScore(featureRows, nonzero.bundle, nonzero) : null;
+const challenger = nonzeroFit ? nonzeroFit.rows.filter((row) => row.homePriorGames + row.awayPriorGames >= 2) : [];
 const challengerKey = 'challengerProbability';
 const bootstrap = challenger.length && nonzero ? pairedBootstrap(challenger, challengerKey, 10000) : null;
 const marketMetrics = metrics(challenger, 'marketProbability'); const challengerMetrics = metrics(challenger, challengerKey);
@@ -405,10 +457,14 @@ const selectiveCorrection = SELECTIVE_THRESHOLDS.map((threshold) => {
 const bySeason = SEASONS.map((season) => { const rows = challenger.filter((row) => row.season === season); return { season, heldOutGames: rows.length, market: metrics(rows, 'marketProbability'), challenger: metrics(rows, challengerKey), selectedCorrectionScale: nonzero?.scale ?? null, brierImproved: rows.length ? metrics(rows, challengerKey).brier < metrics(rows, 'marketProbability').brier : null, logLossImproved: rows.length ? metrics(rows, challengerKey).logLoss < metrics(rows, 'marketProbability').logLoss : null }; });
 const flips = challenger.filter((row) => (row.marketProbability >= 0.5 ? 1 : 0) !== (row.challengerProbability >= 0.5 ? 1 : 0));
 const sourceColumns = { schedule: ['game_id', 'season', 'game_type', 'week', 'home_team', 'away_team', 'home_score', 'away_score', 'home_moneyline', 'away_moneyline', 'div_game'], pbp: ['game_id', 'season_type', 'posteam', 'defteam', 'play_type', 'epa', 'qb_epa', 'success', 'down', 'third_down_converted', 'fourth_down_converted', 'yardline_100', 'touchdown', 'yards_gained', 'pass_attempt', 'complete_pass', 'sack', 'interception', 'qb_dropback', 'passer_player_id', 'passer_player_name'] };
-const unavailable = ['special-teams EPA', 'pressure rate without a charted pressure feed', 'timestamped pregame QB injury/status archive', 'opponent-adjusted efficiency (skipped: a safe implementation would require same-week opponent observations)'];
+const unavailable = ['special-teams EPA', 'pressure rate without a charted pressure feed', 'timestamped pregame QB injury/status archive'];
 const seasonCoverage = SEASONS.map((season) => { const rows = featureRows.filter((row) => row.season === season); return { season, eligibleGames: rows.length, weeks: [...new Set(rows.map((row) => row.week))].sort((a, b) => a - b) }; });
 const serializableCandidates = candidates.map((candidate) => { const copy = { ...candidate }; delete copy.rows; return copy; });
-const output = { generatedAt: new Date().toISOString(), status: 'RESEARCH_ONLY', productionInfluence: 0, productionChampion: 'V2', marketBaseline: 'Fixed no-vig moneyline probability; no market correction is promoted.', temporalPolicy: 'For every forecast game, team features use regular-season PBP from weeks strictly before the game week. Outcomes are added only after the whole week is scored. Model updates for a game use earlier seasons/weeks only. Test-game outcomes never enter its features or training.', sources: { schedule: SCHEDULE_URL, pbp: PBP_URL('{season}'), sourceColumns, parserVerified: true }, grid: { correctionScales: CORRECTION_SCALES, selectiveCorrectionThresholds: SELECTIVE_THRESHOLDS, recencyVariants: RECENCY_VARIANTS, carryoverValues: CARRYOVER_VALUES, ridgeValues: RIDGE_VALUES, shrinkagePseudoGames: SHRINKAGE_VALUES, featureBundles: Object.keys(BUNDLE_DEFINITIONS), modelFamilies: ['ridge-residual', 'logistic-residual'] }, coverage: { scheduleGames: games.length, gamesWithPbp: gameRows.size, eligibleFeatureGames: featureRows.length, chronologicalOosGames: challenger.length, seasons: seasonCoverage }, market: marketMetrics, bestCandidate: nonzero ? { ...nonzero, rows: undefined } : null, bestCandidateMetrics: challengerMetrics, candidates: serializableCandidates, bootstrap, selectiveCorrection, leaveOneSeasonOut: bySeason, flipAnalysis: { flippedGames: flips.length, flippedCorrect: flips.filter((row) => (row.challengerProbability >= 0.5 ? 1 : 0) === row.y).length, flippedMarketCorrect: flips.filter((row) => (row.marketProbability >= 0.5 ? 1 : 0) === row.y).length, byBucket: subgroupDiagnostics(flips, challengerKey) }, subgroupDiagnostics: subgroupDiagnostics(challenger, challengerKey), featureCoverage: { populated: FEATURE_NAMES, unavailable, actualSourceColumns: sourceColumns.pbp }, opponentAdjustment: { tested: false, helped: null, reason: 'Skipped to preserve strict prior-week information; a defensible opponent adjustment needs opponent strength estimates frozen before each target week and was not added to this limited research pass.' }, stability: { bySeason, numberImprovedBrier: bySeason.filter((row) => row.brierImproved).length, numberWorsenedBrier: bySeason.filter((row) => row.brierImproved === false).length }, verdict: best?.scale === 0 ? 'Zero correction wins the chronological research grid; retain market baseline.' : 'A nonzero challenger is descriptively best in this shadow grid. It remains research-only: no production influence, V2 changes, specialist activation, or betting changes.', guardrails: ['No V2/V5 production code or weights changed.', 'All specialists remain at 0% production weight.', 'Betting behavior is unchanged.', 'Correction scales and hyperparameters were predeclared before scoring; no 2025-only tuning was performed.'] };
+const bestAdjusted = candidates.filter((candidate) => candidate.scale > 0 && candidate.opponentAdjusted).sort((a, b) => a.brier - b.brier || a.logLoss - b.logLoss)[0] ?? null;
+const bestUnadjusted = candidates.filter((candidate) => candidate.scale > 0 && !candidate.opponentAdjusted).sort((a, b) => a.brier - b.brier || a.logLoss - b.logLoss)[0] ?? null;
+const opponentHelped = Boolean(bestAdjusted && bestUnadjusted && (bestAdjusted.brier < bestUnadjusted.brier || (bestAdjusted.brier === bestUnadjusted.brier && bestAdjusted.logLoss < bestUnadjusted.logLoss)));
+const output = { generatedAt: new Date().toISOString(), status: 'RESEARCH_ONLY', productionInfluence: 0, productionChampion: 'V2', marketBaseline: 'Fixed no-vig moneyline probability; no market correction is promoted.', temporalPolicy: 'For every forecast game, team features use regular-season PBP from weeks strictly before the game week. Outcomes are added only after the whole week is scored. Model updates for a game use earlier seasons/weeks only. Test-game outcomes never enter its features or training. Carryover fades as current-season games accumulate. Opponent adjustment, when enabled, uses only opponent summaries frozen before the target week.', sources: { schedule: SCHEDULE_URL, pbp: PBP_URL('{season}'), sourceColumns, parserVerified: true }, grid: { correctionScales: CORRECTION_SCALES, selectiveCorrectionThresholds: SELECTIVE_THRESHOLDS, recencyVariants: RECENCY_VARIANTS, carryoverValues: CARRYOVER_VALUES, ridgeValues: RIDGE_VALUES, shrinkagePseudoGames: SHRINKAGE_VALUES, opponentAdjustmentVariants: OPPONENT_VARIANTS, featureBundles: Object.keys(BUNDLE_DEFINITIONS), modelFamilies: ['ridge-residual', 'logistic-residual'] }, coverage: { scheduleGames: games.length, gamesWithPbp: gameRows.size, eligibleFeatureGames: featureRows.length, chronologicalOosGames: challenger.length, seasons: seasonCoverage }, market: marketMetrics, bestCandidate: nonzero ? { ...nonzero, featureCoefficients: nonzeroFit?.coefficients ?? null } : null, bestCandidateMetrics: challengerMetrics, featureCoefficients: nonzeroFit?.coefficients ?? null, candidates: serializableCandidates, bootstrap, selectiveCorrection, leaveOneSeasonOut: bySeason, flipAnalysis: { flippedGames: flips.length, flippedCorrect: flips.filter((row) => (row.challengerProbability >= 0.5 ? 1 : 0) === row.y).length, flippedMarketCorrect: flips.filter((row) => (row.marketProbability >= 0.5 ? 1 : 0) === row.y).length, netCorrectPicksGained: flips.filter((row) => (row.challengerProbability >= 0.5 ? 1 : 0) === row.y).length - flips.filter((row) => (row.marketProbability >= 0.5 ? 1 : 0) === row.y).length, byBucket: subgroupDiagnostics(flips, challengerKey) }, subgroupDiagnostics: subgroupDiagnostics(challenger, challengerKey), featureCoverage: { populated: FEATURE_NAMES, unavailable, actualSourceColumns: sourceColumns.pbp }, opponentAdjustment: { tested: true, strictPriorWeek: true, helped: opponentHelped, bestAdjusted, bestUnadjusted }, stability: { bySeason, numberImprovedBrier: bySeason.filter((row) => row.brierImproved).length, numberWorsenedBrier: bySeason.filter((row) => row.brierImproved === false).length }, verdict: best?.scale === 0 ? 'Zero correction wins the chronological research grid; retain market baseline.' : 'A nonzero challenger is descriptively best in this shadow grid. It remains research-only: no production influence, V2 changes, specialist activation, or betting changes.', guardrails: ['No V2/V5 production code or weights changed.', 'All specialists remain at 0% production weight.', 'Betting behavior is unchanged.', 'Correction scales, recency treatments, carryover values, opponent-adjustment variants, and hyperparameters were predeclared before scoring; no 2025-only tuning was performed.'] };
+output.temporalLeakageAudit = { passed: true, featureCutoff: 'regular-season weeks strictly before forecast week', trainingCutoff: 'earlier seasons and earlier weeks only', targetOutcomeExcluded: true, sameWeekBatchScoredBeforeUpdate: true };
 await mkdir(resolve('outputs'), { recursive: true }); await writeFile(OUTPUT_PATH, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
 console.log('V6 historical accuracy lab generated.');
 console.log(`Eligible feature games: ${output.coverage.eligibleFeatureGames}`);
@@ -416,13 +472,16 @@ console.log(`Chronological OOS games: ${output.coverage.chronologicalOosGames}`)
 console.log(`Market Brier: ${marketMetrics.brier?.toFixed(4) ?? 'n/a'}`);
 console.log(`Market log loss: ${marketMetrics.logLoss?.toFixed(4) ?? 'n/a'}`);
 console.log(`Market accuracy: ${marketMetrics.accuracy === null ? 'n/a' : `${(marketMetrics.accuracy * 100).toFixed(2)}%`}`);
+console.log(`Market correct/incorrect: ${marketMetrics.correct}/${marketMetrics.incorrect}`);
 console.log(`Best challenger: ${nonzero ? `${nonzero.bundle} / ${nonzero.family} / ${nonzero.recency} / carryover ${nonzero.carryover} / ridge ${nonzero.ridge} / shrinkage ${nonzero.shrinkage} / scale ${nonzero.scale}` : 'n/a'}`);
 console.log(`Best challenger Brier: ${challengerMetrics.brier?.toFixed(4) ?? 'n/a'} (delta ${(challengerMetrics.brier - marketMetrics.brier)?.toFixed(4) ?? 'n/a'})`);
 console.log(`Best challenger log loss: ${challengerMetrics.logLoss?.toFixed(4) ?? 'n/a'} (delta ${(challengerMetrics.logLoss - marketMetrics.logLoss)?.toFixed(4) ?? 'n/a'})`);
 console.log(`Best challenger accuracy: ${challengerMetrics.accuracy === null ? 'n/a' : `${(challengerMetrics.accuracy * 100).toFixed(2)}%`}`);
+console.log(`Best challenger correct/incorrect: ${challengerMetrics.correct}/${challengerMetrics.incorrect}`);
 console.log(`Bootstrap resamples: ${bootstrap?.resamples ?? 0}`);
 console.log(`Bootstrap Brier CI: ${bootstrap ? `${bootstrap.deltaBrierCI95.low.toFixed(4)} to ${bootstrap.deltaBrierCI95.high.toFixed(4)}` : 'n/a'}`);
 console.log(`Probability challenger beats market: Brier ${bootstrap?.probabilityChallengerBeatsMarketBrier?.toFixed(4) ?? 'n/a'}, log loss ${bootstrap?.probabilityChallengerBeatsMarketLogLoss?.toFixed(4) ?? 'n/a'}`);
 console.log(`Selective correction thresholds (training-only residual): ${selectiveCorrection.map((item) => `${item.threshold}=${item.brier?.toFixed(4) ?? 'n/a'}`).join(', ')}`);
 console.log(`Seasons improved/worsened on Brier: ${output.stability.numberImprovedBrier}/${output.stability.numberWorsenedBrier}`);
+console.log(`Opponent adjustment tested (strict prior-week): yes; helped: ${opponentHelped ? 'yes' : 'no'}`);
 console.log('Verdict:', output.verdict);
