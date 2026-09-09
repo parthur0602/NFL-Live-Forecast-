@@ -312,19 +312,20 @@ function metrics(rows, key) {
 function xorshift(seed) { let state = seed >>> 0; return () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296; }; }
 
 function pairedBootstrap(rows, challengerKey, resamples = 10000) {
-  const random = xorshift(0x6f4e5d3c); const deltaBrier = []; const deltaLogLoss = []; let brierWins = 0; let logLossWins = 0;
+  const random = xorshift(0x6f4e5d3c); const deltaBrier = []; const deltaLogLoss = []; const deltaAccuracy = []; let brierWins = 0; let logLossWins = 0;
   for (let sample = 0; sample < resamples; sample += 1) {
-    let marketBrier = 0; let challengerBrier = 0; let marketLog = 0; let challengerLog = 0;
+    let marketBrier = 0; let challengerBrier = 0; let marketLog = 0; let challengerLog = 0; let marketCorrect = 0; let challengerCorrect = 0;
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[Math.floor(random() * rows.length)]; const market = clamp(row.marketProbability, 0.01, 0.99); const challenge = clamp(row[challengerKey], 0.01, 0.99);
       marketBrier += (market - row.y) ** 2; challengerBrier += (challenge - row.y) ** 2;
       marketLog += -(row.y * Math.log(market) + (1 - row.y) * Math.log(1 - market)); challengerLog += -(row.y * Math.log(challenge) + (1 - row.y) * Math.log(1 - challenge));
+      marketCorrect += (market >= 0.5 ? 1 : 0) === row.y ? 1 : 0; challengerCorrect += (challenge >= 0.5 ? 1 : 0) === row.y ? 1 : 0;
     }
     const db = challengerBrier / rows.length - marketBrier / rows.length; const dl = challengerLog / rows.length - marketLog / rows.length;
-    deltaBrier.push(db); deltaLogLoss.push(dl); if (db < 0) brierWins += 1; if (dl < 0) logLossWins += 1;
+    deltaBrier.push(db); deltaLogLoss.push(dl); deltaAccuracy.push((challengerCorrect - marketCorrect) / rows.length); if (db < 0) brierWins += 1; if (dl < 0) logLossWins += 1;
   }
   const interval = (values) => { const ordered = [...values].sort((a, b) => a - b); return { low: ordered[Math.floor(values.length * 0.025)], high: ordered[Math.floor(values.length * 0.975)] }; };
-  return { resamples, deltaBrier: mean(deltaBrier), deltaLogLoss: mean(deltaLogLoss), deltaAccuracy: mean(rows.map((row) => (row[challengerKey] >= 0.5 ? 1 : 0) === row.y ? 1 : 0)) - mean(rows.map((row) => (row.marketProbability >= 0.5 ? 1 : 0) === row.y ? 1 : 0)), deltaBrierCI95: interval(deltaBrier), deltaLogLossCI95: interval(deltaLogLoss), probabilityChallengerBeatsMarketBrier: brierWins / resamples, probabilityChallengerBeatsMarketLogLoss: logLossWins / resamples };
+  return { resamples, deltaBrier: mean(deltaBrier), deltaLogLoss: mean(deltaLogLoss), deltaAccuracy: mean(deltaAccuracy), deltaBrierCI95: interval(deltaBrier), deltaLogLossCI95: interval(deltaLogLoss), deltaAccuracyCI95: interval(deltaAccuracy), probabilityChallengerBeatsMarketBrier: brierWins / resamples, probabilityChallengerBeatsMarketLogLoss: logLossWins / resamples };
 }
 
 function fitAndScore(rows, bundle, config) {
@@ -478,10 +479,14 @@ console.log(`Best challenger Brier: ${challengerMetrics.brier?.toFixed(4) ?? 'n/
 console.log(`Best challenger log loss: ${challengerMetrics.logLoss?.toFixed(4) ?? 'n/a'} (delta ${(challengerMetrics.logLoss - marketMetrics.logLoss)?.toFixed(4) ?? 'n/a'})`);
 console.log(`Best challenger accuracy: ${challengerMetrics.accuracy === null ? 'n/a' : `${(challengerMetrics.accuracy * 100).toFixed(2)}%`}`);
 console.log(`Best challenger correct/incorrect: ${challengerMetrics.correct}/${challengerMetrics.incorrect}`);
+console.log(`Delta vs market: accuracy ${((challengerMetrics.accuracy - marketMetrics.accuracy) * 100)?.toFixed(2) ?? 'n/a'} pp, Brier ${(challengerMetrics.brier - marketMetrics.brier)?.toFixed(6) ?? 'n/a'}, log loss ${(challengerMetrics.logLoss - marketMetrics.logLoss)?.toFixed(6) ?? 'n/a'}`);
 console.log(`Bootstrap resamples: ${bootstrap?.resamples ?? 0}`);
 console.log(`Bootstrap Brier CI: ${bootstrap ? `${bootstrap.deltaBrierCI95.low.toFixed(4)} to ${bootstrap.deltaBrierCI95.high.toFixed(4)}` : 'n/a'}`);
+console.log(`Bootstrap log loss CI: ${bootstrap ? `${bootstrap.deltaLogLossCI95.low.toFixed(4)} to ${bootstrap.deltaLogLossCI95.high.toFixed(4)}` : 'n/a'}`);
+console.log(`Bootstrap accuracy CI: ${bootstrap ? `${(bootstrap.deltaAccuracyCI95.low * 100).toFixed(2)} to ${(bootstrap.deltaAccuracyCI95.high * 100).toFixed(2)} pp` : 'n/a'}`);
 console.log(`Probability challenger beats market: Brier ${bootstrap?.probabilityChallengerBeatsMarketBrier?.toFixed(4) ?? 'n/a'}, log loss ${bootstrap?.probabilityChallengerBeatsMarketLogLoss?.toFixed(4) ?? 'n/a'}`);
 console.log(`Selective correction thresholds (training-only residual): ${selectiveCorrection.map((item) => `${item.threshold}=${item.brier?.toFixed(4) ?? 'n/a'}`).join(', ')}`);
+console.log(`Pick flips: ${flips.length}; market correct ${output.flipAnalysis.flippedMarketCorrect}; challenger correct ${output.flipAnalysis.flippedCorrect}; net correct picks gained ${output.flipAnalysis.netCorrectPicksGained}`);
 console.log(`Seasons improved/worsened on Brier: ${output.stability.numberImprovedBrier}/${output.stability.numberWorsenedBrier}`);
 console.log(`Opponent adjustment tested (strict prior-week): yes; helped: ${opponentHelped ? 'yes' : 'no'}`);
 console.log('Verdict:', output.verdict);
