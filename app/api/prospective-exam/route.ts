@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server';
 import { env } from 'cloudflare:workers';
 import { learnedProbability } from '@/lib/forecast';
-import { safeModelState } from '@/lib/learning';
+import { safeModelState, saveMarketSnapshots } from '@/lib/learning';
 import {
   fetchMarketLines,
   MARKET_SOURCE_LABEL,
 } from '@/lib/market';
-import { MODEL_V2, v2HomeProbability } from '@/lib/model-v2';
+import {
+  impliedProbability,
+  MODEL_V2,
+  spreadProbabilities,
+  v2ExpectedHomeMargin,
+  v2HomeProbability,
+} from '@/lib/model-v2';
 import {
   captureHorizon,
   captureProspectiveRows,
@@ -30,6 +36,13 @@ type ScheduleEvent = {
   date?: string;
   season?: { year?: number; type?: number };
   week?: { number?: number };
+  status?: {
+    type?: {
+      state?: string;
+      completed?: boolean;
+      shortDetail?: string;
+    };
+  };
   competitions?: Array<{
     date?: string;
     competitors?: Array<{
@@ -44,7 +57,16 @@ type CurrentGame = {
   awayTeam: string;
   homeTeam: string;
   scheduledKickoffAt: string | null;
+  gameState: 'scheduled' | 'in_progress' | 'final';
+  statusDetail: string | null;
 };
+
+function scheduleGameState(event: ScheduleEvent): CurrentGame['gameState'] {
+  const state = event.status?.type?.state?.toLowerCase();
+  if (event.status?.type?.completed || state === 'post') return 'final';
+  if (state === 'in') return 'in_progress';
+  return 'scheduled';
+}
 
 function database() {
   const binding = (env as unknown as { DB?: D1Database }).DB;
@@ -69,9 +91,16 @@ async function scheduleForWeek(week: number): Promise<CurrentGame[]> {
       awayTeam: away,
       homeTeam: home,
       scheduledKickoffAt: competition?.date ?? event.date ?? null,
+      gameState: scheduleGameState(event),
+      statusDetail: event.status?.type?.shortDetail ?? null,
     }];
   });
-  return [...new Map(games.map((game) => [game.gameKey, game])).values()];
+  return [...new Map(games.map((game) => [game.gameKey, game])).values()]
+    .sort((left, right) => {
+      const leftTime = new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
+      const rightTime = new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
+      return leftTime - rightTime || left.gameKey.localeCompare(right.gameKey);
+    });
 }
 
 export async function GET(request: Request) {
@@ -95,6 +124,13 @@ export async function GET(request: Request) {
     ]);
     const capturedAt = new Date().toISOString();
     const byGame = new Map(lines.map((line) => [line.gameKey, line]));
+    const marketForSlate = games.flatMap((game) => {
+      const line = byGame.get(game.gameKey);
+      return line
+        ? [{ ...line, source: MARKET_SOURCE_LABEL, observedAt: capturedAt }]
+        : [];
+    });
+    await saveMarketSnapshots(marketForSlate);
     const pairs: ProspectiveCaptureInput[] = games.map((game) => {
       const market = byGame.get(game.gameKey) ?? null;
       const marketHomeProbability = market?.homeImpliedProbability ?? null;
@@ -157,7 +193,12 @@ export async function GET(request: Request) {
           productionInfluence: 0,
         },
         capture,
-        games: pairs.map((pair) => ({
+        // `pairs` is created from `games` above in the same order. Keep every
+        // schedule event in the response, including in-progress and completed
+        // games; the capture layer separately prevents post-kickoff snapshots.
+        games: pairs.map((pair, index) => ({
+          gameState: games[index]?.gameState ?? 'scheduled',
+          statusDetail: games[index]?.statusDetail ?? null,
           gameKey: pair.gameKey,
           away: pair.awayTeam,
           home: pair.homeTeam,
@@ -183,6 +224,51 @@ export async function GET(request: Request) {
           v5UnavailableReason: pair.v5Available
             ? null
             : (pair.v5FeaturePayload.unavailableReason ?? null),
+          market: (() => {
+            const line = byGame.get(pair.gameKey);
+            if (!line) return null;
+            // Without a listed spread there is no authoritative market-margin
+            // estimate to display. Do not substitute a made-up zero margin.
+            const expectedHomeMargin =
+              line.homeSpread === null
+                ? null
+                : v2ExpectedHomeMargin(0, line.homeSpread);
+            const cover =
+              expectedHomeMargin === null
+                ? null
+                : spreadProbabilities(expectedHomeMargin, line.homeSpread);
+            const homePrice = impliedProbability(line.homeSpreadOdds);
+            const awayPrice = impliedProbability(line.awaySpreadOdds);
+            const homeEdge =
+              cover === null || homePrice === null ? null : cover.homeCover - homePrice;
+            const awayEdge =
+              cover === null || awayPrice === null ? null : cover.awayCover - awayPrice;
+            const selection =
+              homeEdge !== null && awayEdge !== null && Math.max(homeEdge, awayEdge) > 0
+                ? homeEdge >= awayEdge
+                  ? `${pair.homeTeam} ${line.homeSpread ?? ''}`.trim()
+                  : `${pair.awayTeam} ${line.awaySpread ?? ''}`.trim()
+                : 'Pass — no price edge';
+            return {
+              awayMoneyline: line.awayMoneyline,
+              homeMoneyline: line.homeMoneyline,
+              awaySpread: line.awaySpread,
+              homeSpread: line.homeSpread,
+              totalLine: line.totalLine,
+              awaySpreadOdds: line.awaySpreadOdds,
+              homeSpreadOdds: line.homeSpreadOdds,
+              awayImpliedProbability: line.awayImpliedProbability,
+              homeImpliedProbability: line.homeImpliedProbability,
+              expectedHomeMargin,
+              spreadProbabilities: cover,
+              betting: {
+                selection,
+                homeEdge,
+                awayEdge,
+                policy: MODEL_V2.decisionRule,
+              },
+            };
+          })(),
           label: V5_SHADOW_LABEL,
         })),
       },

@@ -5,7 +5,7 @@ import { createServer } from 'vite';
 
 const database = new DatabaseSync(':memory:');
 const preservedTables = [
-  'prediction_snapshots', 'market_snapshots', 'game_postmortems',
+  'prediction_snapshots', 'game_postmortems',
   'error_memory', 'success_memory', 'specialist_registry',
   'weekly_learning_runs', 'model_adjustments',
 ];
@@ -13,6 +13,18 @@ for (const table of preservedTables) {
   database.exec(`CREATE TABLE ${table} (id INTEGER PRIMARY KEY, marker TEXT NOT NULL);`);
   database.prepare(`INSERT INTO ${table} (id, marker) VALUES (1, ?);`).run(`${table}-seed`);
 }
+// Market persistence is exercised by the live prospective endpoint, so this
+// preserved table uses its production columns plus the migration marker.
+database.exec(`CREATE TABLE market_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  season INTEGER NOT NULL, week INTEGER NOT NULL, game_key TEXT NOT NULL,
+  source TEXT NOT NULL, observed_at TEXT NOT NULL,
+  away_moneyline INTEGER, home_moneyline INTEGER,
+  away_spread REAL, home_spread REAL, total_line REAL,
+  away_spread_odds INTEGER, home_spread_odds INTEGER,
+  over_odds INTEGER, under_odds INTEGER, marker TEXT
+);`);
+database.prepare(`INSERT INTO market_snapshots (season, week, game_key, source, observed_at, marker) VALUES (2026, 1, 'seed', 'seed', '2026-01-01T00:00:00.000Z', 'market_snapshots-seed');`).run();
 const migration = await readFile('drizzle/0006_prospective_model_exam.sql', 'utf8');
 database.exec(migration.replaceAll('--> statement-breakpoint', ''));
 
@@ -63,6 +75,7 @@ const vite = await createServer({
 });
 const exam = await vite.ssrLoadModule('/lib/prospective-model-exam.ts');
 const shadow = await vite.ssrLoadModule('/lib/v5-prospective-shadow.ts');
+const learning = await vite.ssrLoadModule('/lib/learning.ts');
 const localAdapter = await vite.ssrLoadModule('/lib/local-cloudflare.ts');
 const localMirror = localAdapter.env.DB.prepare(
   `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'prospective_model_snapshots'`,
@@ -154,6 +167,18 @@ const afterKickoff = await exam.captureProspectiveRows(
 assert.equal(afterKickoff.inserted, 0);
 assert.equal(afterKickoff.skippedAfterKickoff, 1);
 
+const marketObservation = {
+  week: 2, gameKey: availableItem.gameKey, source: 'deterministic-test-market',
+  observedAt: captureTime, awayMoneyline: 120, homeMoneyline: -140,
+  awaySpread: 3, homeSpread: -3, totalLine: 44.5,
+  awaySpreadOdds: -110, homeSpreadOdds: -110, overOdds: -110, underOdds: -110,
+};
+await learning.saveMarketSnapshots([marketObservation]);
+await learning.saveMarketSnapshots([{ ...marketObservation, observedAt: '2026-09-09T20:50:00.000Z' }]);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM market_snapshots WHERE game_key = ? AND source = ?`).get(availableItem.gameKey, marketObservation.source).count, 1);
+await learning.saveMarketSnapshots([{ ...marketObservation, observedAt: '2026-09-09T21:10:00.000Z' }]);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM market_snapshots WHERE game_key = ? AND source = ?`).get(availableItem.gameKey, marketObservation.source).count, 2);
+
 const sameMarket = database.prepare(
   `SELECT market_home_probability, v2_home_probability FROM prospective_model_snapshots WHERE game_key = ? LIMIT 1`,
 ).get(availableItem.gameKey);
@@ -187,6 +212,7 @@ assert.deepEqual(indexes, [
 ]);
 for (const table of preservedTables)
   assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 1);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM market_snapshots WHERE marker = 'market_snapshots-seed'`).get().count, 1);
 
 const savedFetch = globalThis.fetch;
 globalThis.fetch = async (input) => {
@@ -232,6 +258,7 @@ console.log(JSON.stringify({
   settlement: 'PASS',
   seasonExam: report,
   canonicalRecordInflation: 'PASS',
+  marketHourlyDedupe: 'PASS',
   serverComputedEndpoint: 'PASS',
   exampleAvailableRow: database.prepare(`SELECT * FROM prospective_model_snapshots WHERE v5_available = 1 ORDER BY id LIMIT 1`).get(),
   exampleUnavailableRow: database.prepare(`SELECT * FROM prospective_model_snapshots WHERE v5_available = 0 ORDER BY id LIMIT 1`).get(),

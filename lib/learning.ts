@@ -787,28 +787,77 @@ export async function saveMarketSnapshots(
   }>,
 ) {
   const database = db();
-  const statements = items.slice(0, 18).map((item) =>
-    database
-      .prepare(
-        `INSERT OR IGNORE INTO market_snapshots (season, week, game_key, source, observed_at, away_moneyline, home_moneyline, away_spread, home_spread, total_line, away_spread_odds, home_spread_odds, over_odds, under_odds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        SEASON,
-        item.week,
-        item.gameKey,
-        item.source,
-        item.observedAt,
-        item.awayMoneyline,
-        item.homeMoneyline,
-        item.awaySpread,
-        item.homeSpread,
-        item.totalLine,
-        item.awaySpreadOdds,
-        item.homeSpreadOdds,
-        item.overOdds,
-        item.underOdds,
-      ),
-  );
+  // The dashboard polls the server more often than a market normally moves.
+  // Keep the time series when a line actually changes, but ignore identical
+  // observations in the same UTC hour so viewing the dashboard never floods
+  // market_snapshots.
+  const statements = (
+    await Promise.all(
+      items.slice(0, 18).map(async (item) => {
+        const observed = new Date(item.observedAt);
+        if (Number.isNaN(observed.getTime())) return null;
+        const hourStart = new Date(observed);
+        hourStart.setUTCMinutes(0, 0, 0);
+        const hourEnd = new Date(hourStart);
+        hourEnd.setUTCHours(hourEnd.getUTCHours() + 1);
+        const previous = await database
+          .prepare(
+            `SELECT away_moneyline, home_moneyline, away_spread, home_spread, total_line, away_spread_odds, home_spread_odds, over_odds, under_odds FROM market_snapshots WHERE season = ? AND game_key = ? AND source = ? AND observed_at >= ? AND observed_at < ? ORDER BY observed_at DESC LIMIT 1`,
+          )
+          .bind(
+            SEASON,
+            item.gameKey,
+            item.source,
+            hourStart.toISOString(),
+            hourEnd.toISOString(),
+          )
+          .first<{
+            away_moneyline: number | null;
+            home_moneyline: number | null;
+            away_spread: number | null;
+            home_spread: number | null;
+            total_line: number | null;
+            away_spread_odds: number | null;
+            home_spread_odds: number | null;
+            over_odds: number | null;
+            under_odds: number | null;
+          }>();
+        const unchanged =
+          previous !== undefined &&
+          previous !== null &&
+          previous.away_moneyline === item.awayMoneyline &&
+          previous.home_moneyline === item.homeMoneyline &&
+          previous.away_spread === item.awaySpread &&
+          previous.home_spread === item.homeSpread &&
+          previous.total_line === item.totalLine &&
+          previous.away_spread_odds === item.awaySpreadOdds &&
+          previous.home_spread_odds === item.homeSpreadOdds &&
+          previous.over_odds === item.overOdds &&
+          previous.under_odds === item.underOdds;
+        if (unchanged) return null;
+        return database
+          .prepare(
+            `INSERT OR IGNORE INTO market_snapshots (season, week, game_key, source, observed_at, away_moneyline, home_moneyline, away_spread, home_spread, total_line, away_spread_odds, home_spread_odds, over_odds, under_odds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            SEASON,
+            item.week,
+            item.gameKey,
+            item.source,
+            item.observedAt,
+            item.awayMoneyline,
+            item.homeMoneyline,
+            item.awaySpread,
+            item.homeSpread,
+            item.totalLine,
+            item.awaySpreadOdds,
+            item.homeSpreadOdds,
+            item.overOdds,
+            item.underOdds,
+          );
+      }),
+    )
+  ).filter((statement): statement is NonNullable<typeof statement> => statement !== null);
   if (statements.length) await database.batch(statements);
 }
 

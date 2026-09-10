@@ -61,9 +61,17 @@ export default defineConfig(async () => {
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      ...(isLocalNodeRuntime
+        // The temporary HTTPS forwarding used for a browser preview does not
+        // proxy Vite's HMR socket reliably.  Turn HMR off in this local-only
+        // Node path so a healthy preview cannot be covered by a dev overlay.
+        ? { host: true, allowedHosts: true as const, hmr: false }
+        : {}),
+      ...(isCodexSeatbeltSandbox
+        ? { watch: { useFsEvents: false, usePolling: true } }
+        : {}),
+    },
     resolve: isLocalNodeRuntime
       ? { alias: { 'cloudflare:workers': localCloudflareWorkersModule } }
       : undefined,
