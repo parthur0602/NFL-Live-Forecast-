@@ -36,6 +36,13 @@ type ScheduleEvent = {
   date?: string;
   season?: { year?: number; type?: number };
   week?: { number?: number };
+  status?: {
+    type?: {
+      state?: string;
+      completed?: boolean;
+      shortDetail?: string;
+    };
+  };
   competitions?: Array<{
     date?: string;
     competitors?: Array<{
@@ -50,7 +57,16 @@ type CurrentGame = {
   awayTeam: string;
   homeTeam: string;
   scheduledKickoffAt: string | null;
+  gameState: 'scheduled' | 'in_progress' | 'final';
+  statusDetail: string | null;
 };
+
+function scheduleGameState(event: ScheduleEvent): CurrentGame['gameState'] {
+  const state = event.status?.type?.state?.toLowerCase();
+  if (event.status?.type?.completed || state === 'post') return 'final';
+  if (state === 'in') return 'in_progress';
+  return 'scheduled';
+}
 
 function database() {
   const binding = (env as unknown as { DB?: D1Database }).DB;
@@ -75,9 +91,16 @@ async function scheduleForWeek(week: number): Promise<CurrentGame[]> {
       awayTeam: away,
       homeTeam: home,
       scheduledKickoffAt: competition?.date ?? event.date ?? null,
+      gameState: scheduleGameState(event),
+      statusDetail: event.status?.type?.shortDetail ?? null,
     }];
   });
-  return [...new Map(games.map((game) => [game.gameKey, game])).values()];
+  return [...new Map(games.map((game) => [game.gameKey, game])).values()]
+    .sort((left, right) => {
+      const leftTime = new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
+      const rightTime = new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
+      return leftTime - rightTime || left.gameKey.localeCompare(right.gameKey);
+    });
 }
 
 export async function GET(request: Request) {
@@ -170,7 +193,12 @@ export async function GET(request: Request) {
           productionInfluence: 0,
         },
         capture,
-        games: pairs.map((pair) => ({
+        // `pairs` is created from `games` above in the same order. Keep every
+        // schedule event in the response, including in-progress and completed
+        // games; the capture layer separately prevents post-kickoff snapshots.
+        games: pairs.map((pair, index) => ({
+          gameState: games[index]?.gameState ?? 'scheduled',
+          statusDetail: games[index]?.statusDetail ?? null,
           gameKey: pair.gameKey,
           away: pair.awayTeam,
           home: pair.homeTeam,

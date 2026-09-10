@@ -84,6 +84,8 @@ type SlateGame = {
   away: string;
   home: string;
   scheduledKickoffAt: string | null;
+  gameState: 'scheduled' | 'in_progress' | 'final';
+  statusDetail: string | null;
   captureHorizon: string;
   marketHomeProbability: number | null;
   marketSource: string | null;
@@ -220,6 +222,47 @@ function statusForKickoff(kickoff: string | null) {
   if (ms <= 0) return 'Kickoff passed';
   if (ms < 2 * 60 * 60_000) return 'Near kickoff';
   return 'Upcoming';
+}
+function gameStatus(game: SlateGame) {
+  if (game.gameState === 'in_progress') return game.statusDetail || 'In progress';
+  if (game.gameState === 'final') return game.statusDetail || 'Final';
+  return statusForKickoff(game.scheduledKickoffAt);
+}
+function gameStatusTone(game: SlateGame): 'green' | 'amber' | 'red' | 'blue' | 'neutral' {
+  if (game.gameState === 'in_progress') return 'red';
+  if (game.gameState === 'final') return 'neutral';
+  return statusForKickoff(game.scheduledKickoffAt) === 'Near kickoff' ? 'amber' : 'blue';
+}
+function officialWinnerProbability(game: SlateGame) {
+  return game.v2OfficialPick === game.home
+    ? game.v2OfficialProbability
+    : 1 - game.v2OfficialProbability;
+}
+function marketWinnerProbability(game: SlateGame) {
+  if (game.marketHomeProbability === null) return null;
+  return game.v2OfficialPick === game.home
+    ? game.marketHomeProbability
+    : 1 - game.marketHomeProbability;
+}
+function winnerReasons(game: SlateGame) {
+  const official = officialWinnerProbability(game);
+  const opponent = game.v2OfficialPick === game.home ? game.away : game.home;
+  const marketProbability = marketWinnerProbability(game);
+  const pickIsHome = game.v2OfficialPick === game.home;
+  const pickMoneyline = pickIsHome ? game.market?.homeMoneyline : game.market?.awayMoneyline;
+  const pickSpread = pickIsHome ? game.market?.homeSpread : game.market?.awaySpread;
+  const reasons = [`V2 currently favors ${game.v2OfficialPick}, ${pct(official)} to ${pct(1 - official)} over ${opponent}.`];
+  if (marketProbability !== null) {
+    const correction = official - marketProbability;
+    reasons.push(Math.abs(correction) < 0.005
+      ? `The official pick is following the market baseline: ${pct(marketProbability)} for ${game.v2OfficialPick}.`
+      : `V2 is ${Math.abs(correction * 100).toFixed(1)} points ${correction > 0 ? 'above' : 'below'} the market's ${pct(marketProbability)} estimate for ${game.v2OfficialPick}.`);
+  }
+  if (pickMoneyline !== null || pickSpread !== null)
+    reasons.push(`Current market line: moneyline ${price(pickMoneyline)} · spread ${spread(pickSpread)}.`);
+  if (game.gameState !== 'scheduled')
+    reasons.push('This is the locked pregame V2 selection; it is not a live-game prediction.');
+  return reasons;
 }
 function confidence(probability: number) {
   const favorite = Math.max(probability, 1 - probability);
@@ -379,8 +422,10 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   }, [selected, week]);
 
   const currentGames = slate?.games ?? [];
-  const liveGames = currentGames.filter((game) => statusForKickoff(game.scheduledKickoffAt) !== 'Kickoff passed');
-  const nextGame = [...liveGames].sort((left, right) => (new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER) - (new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER))[0] ?? currentGames[0] ?? null;
+  const upcomingGames = currentGames.filter((game) => game.gameState === 'scheduled' && new Date(game.scheduledKickoffAt ?? '').getTime() > Date.now());
+  const inProgressGames = currentGames.filter((game) => game.gameState === 'in_progress');
+  const finalGames = currentGames.filter((game) => game.gameState === 'final');
+  const nextGame = [...upcomingGames].sort((left, right) => (new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER) - (new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER))[0] ?? currentGames[0] ?? null;
   const slateV5Available = currentGames.filter((game) => game.v5Available).length;
   const canonical = learning?.record;
   const systems = useMemo(() => {
@@ -432,7 +477,7 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
         <NextGame game={nextGame} retrievedAt={slate?.retrievedAt ?? null} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
 
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Upcoming games" value={slate ? String(liveGames.length) : '—'} detail={slate ? `Week ${slate.week} · ${currentGames.length} scheduled` : 'Loading schedule'} icon={<CalendarClock className="size-4 text-sky-300" />} />
+          <MetricCard label="Week games" value={slate ? String(currentGames.length) : '—'} detail={slate ? `${upcomingGames.length} upcoming · ${inProgressGames.length} live · ${finalGames.length} final` : 'Loading schedule'} icon={<CalendarClock className="size-4 text-sky-300" />} />
           <MetricCard label="Current season record" value={canonical?.total ? `${canonical.correct}–${canonical.incorrect}` : 'No graded games'} detail={canonical?.total ? `${pct(canonical.accuracy)} accuracy · canonical picks` : 'Canonical record only'} icon={<Trophy className="size-4 text-amber-300" />} />
           <MetricCard label="System health" value={systems.length ? `${healthySystems}/${systems.length}` : '—'} detail={live ? 'Schedule, market, feed and D1 checks' : 'Checking live systems'} icon={<Gauge className="size-4 text-emerald-300" />} />
           <MetricCard label="Last slate refresh" value={slate ? relative(slate.retrievedAt) : '—'} detail={slate ? `Auto-refresh ≤45 sec · ${slate.capture.captureBucket}` : 'Waiting for server'} icon={<Radio className="size-4 text-emerald-300" />} />
@@ -457,7 +502,8 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
         {slateError && <div className="mb-5"><ErrorBox message={slateError} /></div>}
         {slowError && <div className="mb-5"><ErrorBox message={`Background research: ${slowError}`} /></div>}
 
-        <CurrentSlate games={currentGames} loading={!slate && !slateError} onSelect={setSelected} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
+        <WinnerPicks games={currentGames} loading={!slate && !slateError} />
+        <CurrentSlate week={week} games={currentGames} loading={!slate && !slateError} onSelect={setSelected} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
       </div>
       <BenchmarkDialog open={benchmarkOpen} onOpenChange={setBenchmarkOpen} historical={historical} research={research} />
       <ResearchLabDialog open={researchOpen} onOpenChange={setResearchOpen} exam={exam} slate={slate} historical={historical} research={research} dashboard={dashboard} live={live} learning={learning} systems={systems} atlasSort={atlasSort} setAtlasSort={setAtlasSort} />
@@ -470,14 +516,19 @@ function NextGame({ game, retrievedAt, marketHistory, prospectiveHistory }: { ga
   if (!game) return null;
   const market = game.market;
   const movement = currentMovement(marketHistory.filter((row) => row.game_key === game.gameKey), prospectiveHistory.filter((row) => row.game_key === game.gameKey));
-  const v2FavoriteProbability = game.v2OfficialPick === game.home ? game.v2OfficialProbability : 1 - game.v2OfficialProbability;
-  return <section className="mb-6 overflow-hidden rounded-2xl border border-sky-300/25 bg-gradient-to-r from-sky-400/[.12] via-[#0b1927] to-violet-400/[.08] p-5 shadow-lg shadow-black/10"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] font-bold tracking-[0.18em] text-sky-200 uppercase">Next game</p><h2 className="mt-1 text-2xl font-black text-white">{game.away} <span className="text-slate-500">at</span> {game.home}</h2><p className="mt-1 text-sm text-slate-300">{time(game.scheduledKickoffAt)} · {statusForKickoff(game.scheduledKickoffAt)}</p></div><div className="text-right text-xs text-slate-400"><p>Data updated {relative(retrievedAt)}</p><p className="mt-1">{movement ?? 'No prior captured market change.'}</p></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><div className="rounded-xl border border-emerald-300/25 bg-emerald-400/10 p-3"><Pill tone="green">Official · V2 production</Pill><p className="mt-2 text-lg font-black text-white">{game.v2OfficialPick}</p><p className="text-sm text-emerald-100">Win probability {pct(v2FavoriteProbability)}</p></div><div className="rounded-xl border border-violet-300/25 bg-violet-400/10 p-3"><Pill tone="blue">Shadow · V5 / V6 research</Pill><p className="mt-2 text-sm font-bold text-white">{game.v5Available ? `${game.v5ShadowPick} · ${pct(game.v5ShadowProbability)}` : 'V5 unavailable'}</p><p className="mt-1 text-xs leading-relaxed text-violet-100">V6 shadow is unavailable until the historical lab is reviewed and connected. It cannot alter the official pick.</p></div><div className="rounded-xl border border-white/10 bg-white/[.04] p-3"><p className="text-[10px] font-bold tracking-[0.14em] text-slate-400 uppercase">Market odds</p><p className="mt-2 font-bold text-white">ML {price(market?.awayMoneyline)} / {price(market?.homeMoneyline)}</p><p className="mt-1 text-sm text-slate-300">Spread {spread(market?.awaySpread)} / {spread(market?.homeSpread)}</p></div><div className="rounded-xl border border-white/10 bg-white/[.04] p-3"><p className="text-[10px] font-bold tracking-[0.14em] text-slate-400 uppercase">Decision status</p><p className="mt-2 font-bold text-white">{game.disagreement ? 'Official and shadow disagree' : 'No shadow disagreement'}</p><p className="mt-1 text-sm text-slate-300">{game.marketSource ?? 'Market source unavailable'}</p></div></div></section>;
+  return <section className="mb-6 overflow-hidden rounded-2xl border border-sky-300/25 bg-gradient-to-r from-sky-400/[.12] via-[#0b1927] to-violet-400/[.08] p-5 shadow-lg shadow-black/10"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] font-bold tracking-[0.18em] text-sky-200 uppercase">Next game</p><h2 className="mt-1 text-2xl font-black text-white">{game.away} <span className="text-slate-500">at</span> {game.home}</h2><p className="mt-1 text-sm text-slate-300">{time(game.scheduledKickoffAt)} · {gameStatus(game)}</p></div><div className="text-right text-xs text-slate-400"><p>Data updated {relative(retrievedAt)}</p><p className="mt-1">{movement ?? 'No prior captured market change.'}</p></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><div className="rounded-xl border border-emerald-300/25 bg-emerald-400/10 p-3"><Pill tone="green">Official · V2 production</Pill><p className="mt-2 text-lg font-black text-white">{game.v2OfficialPick}</p><p className="text-sm text-emerald-100">Win probability {pct(officialWinnerProbability(game))}</p></div><div className="rounded-xl border border-violet-300/25 bg-violet-400/10 p-3"><Pill tone="blue">Shadow · V5 / V6 research</Pill><p className="mt-2 text-sm font-bold text-white">{game.v5Available ? `${game.v5ShadowPick} · ${pct(game.v5ShadowProbability)}` : 'V5 unavailable'}</p><p className="mt-1 text-xs leading-relaxed text-violet-100">V6 shadow is unavailable until the historical lab is reviewed and connected. It cannot alter the official pick.</p></div><div className="rounded-xl border border-white/10 bg-white/[.04] p-3"><p className="text-[10px] font-bold tracking-[0.14em] text-slate-400 uppercase">Market odds</p><p className="mt-2 font-bold text-white">ML {price(market?.awayMoneyline)} / {price(market?.homeMoneyline)}</p><p className="mt-1 text-sm text-slate-300">Spread {spread(market?.awaySpread)} / {spread(market?.homeSpread)}</p></div><div className="rounded-xl border border-white/10 bg-white/[.04] p-3"><p className="text-[10px] font-bold tracking-[0.14em] text-slate-400 uppercase">Decision status</p><p className="mt-2 font-bold text-white">{game.disagreement ? 'Official and shadow disagree' : 'No shadow disagreement'}</p><p className="mt-1 text-sm text-slate-300">{game.marketSource ?? 'Market source unavailable'}</p></div></div></section>;
 }
 
-function CurrentSlate({ games, loading, onSelect, marketHistory, prospectiveHistory }: { games: SlateGame[]; loading: boolean; onSelect: (game: SlateGame) => void; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>> }) {
+function WinnerPicks({ games, loading }: { games: SlateGame[]; loading: boolean }) {
+  if (loading) return <LoadingSlate />;
+  if (!games.length) return null;
+  return <section className="mb-6"><SectionHeading eyebrow="WINNER PICKS & WHY" title="Official V2 winner picks" detail="Each explanation is limited to the evidence currently used by the official model. Live and final games retain their locked pregame selection." /><div className="grid gap-3 xl:grid-cols-2">{games.map((game) => <article key={`winner-${game.gameKey}`} className="rounded-2xl border border-emerald-400/15 bg-gradient-to-br from-emerald-400/[.06] to-[#0b1927] p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs text-slate-400">{game.away} at {game.home}</p><p className="mt-1 text-lg font-black text-white">{game.v2OfficialPick}</p><p className="mt-1 text-sm text-emerald-100">Official win probability {pct(officialWinnerProbability(game))}</p></div><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill></div><ul className="mt-3 space-y-1.5 text-sm leading-relaxed text-slate-300">{winnerReasons(game).map((reason) => <li key={reason} className="flex gap-2"><span className="mt-1 text-emerald-300">•</span><span>{reason}</span></li>)}</ul></article>)}</div></section>;
+}
+
+function CurrentSlate({ week, games, loading, onSelect, marketHistory, prospectiveHistory }: { week: number; games: SlateGame[]; loading: boolean; onSelect: (game: SlateGame) => void; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>> }) {
   if (loading) return <LoadingSlate />;
   if (!games.length) return <div className="rounded-2xl border border-white/10 bg-[#0b1927] p-8 text-center text-slate-400"><CloudOff className="mx-auto mb-3 size-8" />No current schedule games were returned by the NFL schedule source for this week.</div>;
-  return <section><SectionHeading eyebrow="TODAY / CURRENT WEEK" title="Official V2 selections and shadow research status" detail="Click a game for its captured market history, research state, probabilities, and betting view." />
+  return <section><SectionHeading eyebrow="FULL WEEK SCHEDULE" title={`All Week ${week} games and official V2 selections`} detail="Every scheduled game stays published here, including games in progress and final games. Click a game for its captured history and full forecast detail." />
     <div className="grid gap-4 2xl:grid-cols-2">{games.map((game) => <GameCard game={game} key={game.gameKey} onClick={() => onSelect(game)} marketHistory={marketHistory} prospectiveHistory={prospectiveHistory} />)}</div>
   </section>;
 }
@@ -489,7 +540,7 @@ function GameCard({ game, onClick, marketHistory, prospectiveHistory }: { game: 
   const modelRows = prospectiveHistory.filter((row) => row.game_key === game.gameKey);
   const movement = currentMovement(marketRows, modelRows);
   return <button type="button" onClick={onClick} className="group w-full rounded-2xl border border-white/10 bg-gradient-to-br from-[#0d2133] to-[#081725] p-4 text-left shadow-lg shadow-black/10 transition hover:border-sky-300/35 hover:from-[#10283d] focus:outline-none focus:ring-2 focus:ring-sky-300/50">
-    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={statusForKickoff(game.scheduledKickoffAt) === 'Near kickoff' ? 'amber' : 'blue'}>{statusForKickoff(game.scheduledKickoffAt)}</Pill><Pill tone="green">V2 OFFICIAL</Pill>{game.disagreement && <Pill tone="red">DISAGREEMENT</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
+    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill><Pill tone="green">V2 OFFICIAL</Pill>{game.gameState !== 'scheduled' && <Pill tone="neutral">PREGAME PICK LOCKED</Pill>}{game.disagreement && <Pill tone="red">DISAGREEMENT</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
     <div className="mt-4 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-3"><div><p className="truncate text-lg font-black text-white">{game.away}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Away · {pct(v2Away)}</p></div><span className="pb-1 text-xs font-bold text-slate-600">at</span><div className="text-right"><p className="truncate text-lg font-black text-white">{game.home}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Home · {pct(game.v2OfficialProbability)}</p></div></div>
     <div className="mt-4 grid grid-cols-2 gap-2 border-y border-white/8 py-3 text-xs sm:grid-cols-4"><DataCell label="V2 pick" value={game.v2OfficialPick} /><DataCell label="Market home" value={pct(game.marketHomeProbability)} /><DataCell label="Spread" value={market ? `${spread(market.awaySpread)} / ${spread(market.homeSpread)}` : 'Unavailable'} /><DataCell label="Moneyline" value={`${price(market?.awayMoneyline)} / ${price(market?.homeMoneyline)}`} /></div>
     <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs"><div className="flex items-center gap-2"><Pill tone={game.v5Available ? 'blue' : 'neutral'}>Shadow · V5</Pill><span className="text-slate-400">{game.v5Available ? `${game.v5ShadowPick} · ${pct(game.v5ShadowProbability)}` : 'Unavailable until prior-week features exist'} · V6 lab pending review</span></div>{movement && <span className="flex items-center gap-1 text-sky-200"><Activity className="size-3.5" />{movement.replace('Observed change: ', '')}</span>}</div>
