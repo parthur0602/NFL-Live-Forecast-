@@ -5,19 +5,27 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-const [schema, learning, modelV2, historicalSource, prospective, prospectiveRoute] = await Promise.all([
+const [schema, learning, modelV2, historicalSource, prospective, prospectiveRoute, predictionRoute, forecastDesk] = await Promise.all([
   readFile(resolve('db/schema.ts'), 'utf8'),
   readFile(resolve('lib/learning.ts'), 'utf8'),
   readFile(resolve('lib/model-v2.ts'), 'utf8'),
   readFile(resolve('lib/historical-backtest-data.ts'), 'utf8'),
   readFile(resolve('lib/prospective-model-exam.ts'), 'utf8'),
   readFile(resolve('app/api/prospective-exam/route.ts'), 'utf8'),
+  readFile(resolve('app/api/predictions/route.ts'), 'utf8'),
+  readFile(resolve('app/forecast-desk.tsx'), 'utf8'),
 ]);
 
 assert(
   schema.includes("'forecast_ledger'") &&
     schema.includes('uq_forecast_ledger_game_bucket'),
   'Prospective forecast ledger is missing from the schema.',
+);
+assert(
+  prospectiveRoute.includes('captureVerifiedPredictions') &&
+    !predictionRoute.includes('request.json') &&
+    !forecastDesk.includes("'/api/predictions'"),
+  'Canonical prediction records must be captured only by the server-verified prospective endpoint.',
 );
 assert(
   schema.includes('uq_prediction_snapshots_game'),

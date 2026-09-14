@@ -39,7 +39,7 @@ type ScoreboardResult = {
   homeScore: number;
 };
 
-type CaptureItem = {
+export type ServerVerifiedCaptureItem = {
   week: number;
   gameKey: string;
   away: string;
@@ -691,22 +691,35 @@ export async function modelState(): Promise<LearnedModelState> {
   };
 }
 
-export async function capturePredictions(items: CaptureItem[]) {
-  const database = db();
-  const now = new Date().toISOString();
-  const captureBucket = `${now.slice(0, 13)}:00:00.000Z`;
-  const candidates = items.slice(0, 18);
-  const completed = new Set<string>();
-  const started = new Set<string>();
-  for (const week of new Set(candidates.map((item) => item.week))) {
-    for (const result of await resultsForWeek(week))
-      completed.add(`${result.away}__${result.home}`);
-    for (const gameKey of await startedGameKeysForWeek(week))
-      started.add(gameKey);
-  }
-  const accepted = candidates.filter(
-    (item) => !completed.has(item.gameKey) && !started.has(item.gameKey),
-  );
+type PredictionCaptureResult = {
+  canonicalInserted: number;
+  ledgerInserted: number;
+  canonicalTotal: number;
+};
+
+function captureBucketFor(timestamp: string) {
+  const captured = new Date(timestamp);
+  if (!Number.isFinite(captured.getTime()))
+    throw new Error('Invalid server capture timestamp.');
+  captured.setUTCMinutes(0, 0, 0);
+  return captured.toISOString();
+}
+
+async function writeVerifiedPredictionSnapshots(
+  database: D1Database,
+  items: ServerVerifiedCaptureItem[],
+  capturedAt: string,
+): Promise<PredictionCaptureResult> {
+  const captureBucket = captureBucketFor(capturedAt);
+  const accepted = items.slice(0, 18);
+  const beforeCanonical = await database
+    .prepare(`SELECT COUNT(*) AS count FROM prediction_snapshots WHERE season = ?`)
+    .bind(SEASON)
+    .first<{ count: number }>();
+  const beforeLedger = await database
+    .prepare(`SELECT COUNT(*) AS count FROM forecast_ledger WHERE season = ?`)
+    .bind(SEASON)
+    .first<{ count: number }>();
   const canonicalStatements = accepted.map((item) =>
     database
       .prepare(
@@ -729,7 +742,7 @@ export async function capturePredictions(items: CaptureItem[]) {
         item.modelVersion,
         item.favoriteProbability,
         item.liveDelta,
-        now,
+        capturedAt,
       ),
   );
   const ledgerStatements = accepted.map((item) =>
@@ -755,18 +768,65 @@ export async function capturePredictions(items: CaptureItem[]) {
         item.favoriteProbability,
         item.liveDelta,
         captureBucket,
-        now,
+        capturedAt,
       ),
   );
   if (canonicalStatements.length || ledgerStatements.length)
     await database.batch([...canonicalStatements, ...ledgerStatements]);
-  const captured = await database
+  const afterCanonical = await database
     .prepare(
       `SELECT COUNT(*) AS count FROM prediction_snapshots WHERE season = ?`,
     )
     .bind(SEASON)
     .first<{ count: number }>();
-  return captured?.count ?? 0;
+  const afterLedger = await database
+    .prepare(`SELECT COUNT(*) AS count FROM forecast_ledger WHERE season = ?`)
+    .bind(SEASON)
+    .first<{ count: number }>();
+  return {
+    canonicalInserted:
+      (afterCanonical?.count ?? 0) - (beforeCanonical?.count ?? 0),
+    ledgerInserted: (afterLedger?.count ?? 0) - (beforeLedger?.count ?? 0),
+    canonicalTotal: afterCanonical?.count ?? 0,
+  };
+}
+
+/**
+ * Writes canonical and time-series forecasts that have already been assembled
+ * and verified by a server-side schedule source. This is deliberately not an
+ * HTTP-facing input path: browser payloads cannot create the records used by
+ * learning, grading, or postmortems.
+ */
+export async function captureVerifiedPredictions(
+  items: ServerVerifiedCaptureItem[],
+  capturedAt = new Date().toISOString(),
+) {
+  return writeVerifiedPredictionSnapshots(db(), items, capturedAt);
+}
+
+/**
+ * Legacy server-only capture path. It independently checks a scoreboard for
+ * completed or started games before it delegates to the shared writer.
+ */
+export async function capturePredictions(items: ServerVerifiedCaptureItem[]) {
+  const candidates = items.slice(0, 18);
+  const completed = new Set<string>();
+  const started = new Set<string>();
+  for (const week of new Set(candidates.map((item) => item.week))) {
+    for (const result of await resultsForWeek(week))
+      completed.add(`${result.away}__${result.home}`);
+    for (const gameKey of await startedGameKeysForWeek(week))
+      started.add(gameKey);
+  }
+  const accepted = candidates.filter(
+    (item) => !completed.has(item.gameKey) && !started.has(item.gameKey),
+  );
+  const result = await writeVerifiedPredictionSnapshots(
+    db(),
+    accepted,
+    new Date().toISOString(),
+  );
+  return result.canonicalTotal;
 }
 
 export async function saveMarketSnapshots(

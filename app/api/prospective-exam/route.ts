@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
 import { env } from 'cloudflare:workers';
 import { learnedProbability } from '@/lib/forecast';
-import { safeModelState, saveMarketSnapshots } from '@/lib/learning';
+import {
+  captureVerifiedPredictions,
+  safeModelState,
+  saveMarketSnapshots,
+} from '@/lib/learning';
 import {
   fetchMarketLines,
   MARKET_SOURCE_LABEL,
@@ -135,6 +139,7 @@ export async function GET(request: Request) {
     ]);
     const capturedAt = new Date().toISOString();
     const byGame = new Map(lines.map((line) => [line.gameKey, line]));
+    const footballProbabilityByGame = new Map<string, number>();
     const preKickoffGames = games.filter((game) =>
       isPreKickoffCaptureEligible(game, capturedAt),
     );
@@ -155,6 +160,7 @@ export async function GET(request: Request) {
         {},
         learned,
       );
+      footballProbabilityByGame.set(game.gameKey, footballHomeProbability);
       const v2 = v2HomeProbability(footballHomeProbability, marketHomeProbability);
       const v5 = calculateV5Shadow({
         week,
@@ -197,6 +203,43 @@ export async function GET(request: Request) {
     // Keep displaying the full slate, but only preserve a market or paired
     // forecast row while the game is independently confirmed as pre-kickoff.
     // This prevents postgame odds/source responses from entering either ledger.
+    const canonicalCapture = await captureVerifiedPredictions(
+      preKickoffGames.flatMap((game) => {
+        const pair = pairs.find((candidate) => candidate.gameKey === game.gameKey);
+        if (!pair) return [];
+        const market = byGame.get(game.gameKey);
+        const marketExpectedHomeMargin =
+          market?.homeSpread === null || market?.homeSpread === undefined
+            ? null
+            : -market.homeSpread;
+        const expectedHomeMargin =
+          marketExpectedHomeMargin === null
+            ? null
+            : v2ExpectedHomeMargin(0, -marketExpectedHomeMargin);
+        const cover =
+          expectedHomeMargin === null
+            ? null
+            : spreadProbabilities(expectedHomeMargin, market?.homeSpread ?? null);
+        return [{
+          week: game.week,
+          gameKey: game.gameKey,
+          away: game.awayTeam,
+          home: game.homeTeam,
+          predictedWinner: pair.v2PredictedWinner,
+          homeProbability: pair.v2HomeProbability,
+          marketHomeProbability: pair.marketHomeProbability,
+          footballHomeProbability: footballProbabilityByGame.get(game.gameKey) ?? null,
+          expectedHomeMargin,
+          marketExpectedHomeMargin,
+          homeSpread: market?.homeSpread ?? null,
+          homeCoverProbability: cover?.homeCover ?? null,
+          modelVersion: pair.v2ModelVersion,
+          favoriteProbability: Math.max(pair.v2HomeProbability, 1 - pair.v2HomeProbability),
+          liveDelta: 0,
+        }];
+      }),
+      capturedAt,
+    );
     const capture = await captureProspectiveRows(
       db,
       pairs.filter((pair, index) =>
@@ -216,6 +259,7 @@ export async function GET(request: Request) {
           productionInfluence: 0,
         },
         capture,
+        canonicalCapture,
         skippedAfterKickoff: games.length - preKickoffGames.length,
         // `pairs` is created from `games` above in the same order. Keep every
         // schedule event in the response, including in-progress and completed

@@ -844,58 +844,6 @@ function ExistingForecastDesk({
   const appliedCount =
     live?.updates.filter((update) => update.status === 'Applied').length ?? 0;
 
-  useEffect(() => {
-    if (
-      !forecast ||
-      !live ||
-      !market ||
-      market.week !== forecast.week ||
-      !renderedGames.length
-    )
-      return;
-    const snapshot = window.setTimeout(() => {
-      void fetch('/api/predictions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          games: renderedGames.map((game) => {
-            const homeFavorite = game.adjustedHome >= 0.5;
-            return {
-              week: game.week,
-              gameKey: `${game.away}__${game.home}`,
-              away: game.away,
-              home: game.home,
-              predictedWinner: homeFavorite ? game.home : game.away,
-              homeProbability: game.adjustedHome,
-              marketHomeProbability:
-                game.market?.homeImpliedProbability ?? null,
-              footballHomeProbability: game.footballHome,
-              expectedHomeMargin: game.expectedMargin,
-              marketExpectedHomeMargin:
-                game.market?.homeSpread === null ||
-                game.market?.homeSpread === undefined
-                  ? null
-                  : -game.market.homeSpread,
-              homeSpread: game.market?.homeSpread ?? null,
-              homeCoverProbability: homeCoverProbability(
-                game.expectedMargin,
-                game.market?.homeSpread ?? null,
-              ),
-              modelVersion: 'V4.0-ERROR-MEMORY-SHADOW',
-              favoriteProbability: homeFavorite
-                ? game.adjustedHome
-                : 1 - game.adjustedHome,
-              liveDelta: game.delta,
-            };
-          }),
-        }),
-      })
-        .then(() => undefined)
-        .catch(() => undefined);
-    }, 0);
-    return () => window.clearTimeout(snapshot);
-  }, [forecast, live, market, renderedGames]);
-
   return (
     <main className="min-h-screen overflow-x-hidden bg-[#071622] text-slate-100">
       <div className="pointer-events-none fixed inset-0 opacity-30 [background-image:linear-gradient(to_right,rgba(86,174,214,.08)_1px,transparent_1px),linear-gradient(to_bottom,rgba(86,174,214,.06)_1px,transparent_1px)] [background-size:80px_80px]" />

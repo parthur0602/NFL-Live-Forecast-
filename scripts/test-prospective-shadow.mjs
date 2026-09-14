@@ -5,28 +5,40 @@ import { createServer } from 'vite';
 
 const database = new DatabaseSync(':memory:');
 const preservedTables = [
-  'prediction_snapshots', 'game_postmortems',
-  'error_memory', 'success_memory', 'specialist_registry',
+  'game_postmortems', 'error_memory', 'success_memory', 'specialist_registry',
   'weekly_learning_runs', 'model_adjustments',
 ];
-for (const table of preservedTables) {
-  database.exec(`CREATE TABLE ${table} (id INTEGER PRIMARY KEY, marker TEXT NOT NULL);`);
-  database.prepare(`INSERT INTO ${table} (id, marker) VALUES (1, ?);`).run(`${table}-seed`);
-}
-// Market persistence is exercised by the live prospective endpoint, so this
-// preserved table uses its production columns plus the migration marker.
-database.exec(`CREATE TABLE market_snapshots (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  season INTEGER NOT NULL, week INTEGER NOT NULL, game_key TEXT NOT NULL,
-  source TEXT NOT NULL, observed_at TEXT NOT NULL,
-  away_moneyline INTEGER, home_moneyline INTEGER,
-  away_spread REAL, home_spread REAL, total_line REAL,
-  away_spread_odds INTEGER, home_spread_odds INTEGER,
-  over_odds INTEGER, under_odds INTEGER, marker TEXT
-);`);
-database.prepare(`INSERT INTO market_snapshots (season, week, game_key, source, observed_at, marker) VALUES (2026, 1, 'seed', 'seed', '2026-01-01T00:00:00.000Z', 'market_snapshots-seed');`).run();
-const migration = await readFile('drizzle/0006_prospective_model_exam.sql', 'utf8');
-database.exec(migration.replaceAll('--> statement-breakpoint', ''));
+const readMigration = async (name) =>
+  (await readFile(`drizzle/${name}`, 'utf8')).replaceAll('--> statement-breakpoint', '');
+
+// Start from the deployed V1 structure, seed a canonical record, then apply
+// every production migration. This proves the new ledger table does not
+// rebuild or erase existing records.
+database.exec(await readMigration('0000_goofy_baron_strucker.sql'));
+database.prepare(`INSERT INTO prediction_snapshots (season, week, game_key, away_team, home_team, predicted_winner, home_probability, favorite_probability, live_delta, captured_at) VALUES (2026, 1, 'preserved__record', 'preserved', 'record', 'record', 0.55, 0.55, 0, '2026-01-01T00:00:00.000Z')`).run();
+database.exec(await readMigration('0001_closed_magik.sql'));
+database.exec(await readMigration('0002_lazy_ares.sql'));
+database.exec(`
+  INSERT INTO model_adjustments (season, week, kind, delta, reason, sample_size, created_at)
+    VALUES (2026, 1, 'seed', 0, 'preservation test', 1, '2026-01-01T00:00:00.000Z');
+  INSERT INTO weekly_learning_runs (season, week, graded_games, correct_picks, brier_score, home_residual, favorite_residual, insight, created_at)
+    VALUES (2026, 1, 1, 1, 0.2, 0, 0, 'preservation test', '2026-01-01T00:00:00.000Z');
+  INSERT INTO game_postmortems (snapshot_id, season, week, game_key, model_version, predicted_winner, actual_winner, home_probability, actual_home_margin, correct, error_severity, probability_surprise, taxonomy_json, pregame_features_json, data_quality, created_at)
+    VALUES (1, 2026, 1, 'preserved__record', 'seed', 'record', 'record', 0.55, 1, 1, 0, 0, '[]', '{}', 'seed', '2026-01-01T00:00:00.000Z');
+  INSERT INTO error_memory (snapshot_id, game_key, severity, pregame_features_json, lesson, created_at)
+    VALUES (1, 'preserved__record', 0.1, '{}', 'preservation test', '2026-01-01T00:00:00.000Z');
+  INSERT INTO success_memory (snapshot_id, game_key, pregame_features_json, lesson, created_at)
+    VALUES (1, 'preserved__record', '{}', 'preservation test', '2026-01-01T00:00:00.000Z');
+  INSERT INTO specialist_registry (code, status, production_weight, evidence, updated_at)
+    VALUES ('seed', 'shadow', 0, 'preservation test', '2026-01-01T00:00:00.000Z');
+`);
+// These production tables have no generic marker column, so use business keys
+// to check that their pre-existing rows survive later migrations.
+database.prepare(`INSERT INTO market_snapshots (season, week, game_key, source, observed_at) VALUES (2026, 1, 'seed', 'seed', '2026-01-01T00:00:00.000Z')`).run();
+database.exec(await readMigration('0003_forecast_ledger.sql'));
+database.exec(await readMigration('0004_football_state_snapshots.sql'));
+database.exec(await readMigration('0005_structured_football_layer.sql'));
+database.exec(await readMigration('0006_prospective_model_exam.sql'));
 
 class Statement {
   constructor(sql, values = []) {
@@ -210,9 +222,18 @@ assert.deepEqual(indexes, [
   'idx_prospective_model_unsettled',
   'uq_prospective_model_game_bucket',
 ]);
+const forecastIndexes = database.prepare(
+  `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'forecast_ledger' ORDER BY name`,
+).all().map((row) => row.name);
+assert.deepEqual(forecastIndexes, [
+  'idx_forecast_ledger_game_time',
+  'idx_forecast_ledger_season_week',
+  'uq_forecast_ledger_game_bucket',
+]);
 for (const table of preservedTables)
   assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 1);
-assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM market_snapshots WHERE marker = 'market_snapshots-seed'`).get().count, 1);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM prediction_snapshots WHERE game_key = 'preserved__record'`).get().count, 1);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM market_snapshots WHERE game_key = 'seed'`).get().count, 1);
 
 const savedFetch = globalThis.fetch;
 globalThis.fetch = async (input) => {
@@ -225,6 +246,14 @@ globalThis.fetch = async (input) => {
         competitions: [{ date: '2099-09-17T00:20:00.000Z', competitors: [
           { homeAway: 'home', team: { displayName: 'Seattle Seahawks' } },
           { homeAway: 'away', team: { displayName: 'New England Patriots' } },
+        ] }],
+      }, {
+        id: 'deterministic-started-game', date: '2099-09-17T03:20:00.000Z',
+        season: { year: 2026, type: 2 }, week: { number: 2 },
+        status: { type: { state: 'in', shortDetail: 'Q2 08:00' } },
+        competitions: [{ date: '2099-09-17T03:20:00.000Z', competitors: [
+          { homeAway: 'home', team: { displayName: 'Started Home' } },
+          { homeAway: 'away', team: { displayName: 'Started Away' } },
         ] }],
       }],
     }), { status: 200 });
@@ -240,12 +269,28 @@ globalThis.fetch = async (input) => {
 const route = await vite.ssrLoadModule('/app/api/prospective-exam/route.ts');
 const routeResponse = await route.GET(new Request('http://localhost/api/prospective-exam?week=2'));
 const routeBody = await routeResponse.json();
+const repeatedRouteResponse = await route.GET(new Request('http://localhost/api/prospective-exam?week=2'));
+const repeatedRouteBody = await repeatedRouteResponse.json();
 globalThis.fetch = savedFetch;
 assert.equal(routeResponse.status, 200);
-assert.equal(routeBody.games.length, 1);
+assert.equal(repeatedRouteResponse.status, 200);
+assert.equal(routeBody.games.length, 2);
 assert.equal(routeBody.games[0].v2OfficialProbability, routeBody.games[0].marketHomeProbability);
 assert.equal(routeBody.games[0].v5Available, false);
 assert.equal(routeBody.capture.inserted, 1);
+assert.equal(routeBody.canonicalCapture.canonicalInserted, 1);
+assert.equal(routeBody.canonicalCapture.ledgerInserted, 1);
+assert.equal(routeBody.skippedAfterKickoff, 1);
+assert.equal(repeatedRouteBody.capture.inserted, 0);
+assert.equal(repeatedRouteBody.canonicalCapture.canonicalInserted, 0);
+assert.equal(repeatedRouteBody.canonicalCapture.ledgerInserted, 0);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM prediction_snapshots`).get().count, 2);
+assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM forecast_ledger WHERE game_key = ?`).get(availableItem.gameKey).count, 1);
+const browserWriteRoute = await vite.ssrLoadModule('/app/api/predictions/route.ts');
+const blockedBrowserWrite = await browserWriteRoute.POST(
+  new Request('http://localhost/api/predictions', { method: 'POST', body: '{}' }),
+);
+assert.equal(blockedBrowserWrite.status, 405);
 
 console.log(JSON.stringify({
   migration: 'PASS',
@@ -258,6 +303,7 @@ console.log(JSON.stringify({
   settlement: 'PASS',
   seasonExam: report,
   canonicalRecordInflation: 'PASS',
+  browserSnapshotWritesBlocked: 'PASS',
   marketHourlyDedupe: 'PASS',
   serverComputedEndpoint: 'PASS',
   exampleAvailableRow: database.prepare(`SELECT * FROM prospective_model_snapshots WHERE v5_available = 1 ORDER BY id LIMIT 1`).get(),
