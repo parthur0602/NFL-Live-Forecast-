@@ -27,6 +27,11 @@ export type V7SnapshotInput = {
     homeSpread: number | null;
     totalLine: number | null;
   };
+  v2: {
+    homeProbability: number;
+    predictedWinner: string;
+    modelVersion: string;
+  };
   probabilities: {
     footballHome: number | null;
     playerAvailabilityHome: number | null;
@@ -36,6 +41,7 @@ export type V7SnapshotInput = {
     finalHome: number;
   };
   modelVersion: string;
+  modelHash: string;
   teamRatings: unknown;
   playerAvailability: unknown;
   depthChart: unknown;
@@ -60,19 +66,20 @@ export async function saveV7ShadowSnapshot(
     return { captured: false, reason: 'KICKOFF_PASSED' as const };
 
   const capturedAt = now.toISOString();
-  await db
+  const result = await db
     .prepare(
       `INSERT OR IGNORE INTO v7_intelligence_snapshots (
         season, week, game_key, away_team, home_team, scheduled_kickoff_at,
         capture_bucket, captured_at, feature_cutoff_at, market_observed_at,
         market_source, market_home_probability, away_moneyline, home_moneyline,
-        home_spread, total_line, football_home_probability,
+        home_spread, total_line, v2_home_probability, v2_predicted_winner,
+        v2_model_version, football_home_probability,
         player_availability_home_probability, matchup_home_probability, upset_risk,
-        upset_home_adjustment, final_home_probability, predicted_winner, model_version,
+        upset_home_adjustment, final_home_probability, predicted_winner, model_version, model_hash,
         team_ratings_json, player_availability_json, depth_chart_json,
         weather_rest_travel_json, team_efficiency_json, specialist_outputs_json,
         source_status_json, production_influence
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     )
     .bind(
       input.season, input.week, input.gameKey, input.awayTeam, input.homeTeam,
@@ -80,18 +87,24 @@ export async function saveV7ShadowSnapshot(
       input.featureCutoffAt, input.market.observedAt, input.market.source,
       input.market.homeProbability, input.market.awayMoneyline,
       input.market.homeMoneyline, input.market.homeSpread, input.market.totalLine,
+      input.v2.homeProbability, input.v2.predictedWinner, input.v2.modelVersion,
       input.probabilities.footballHome, input.probabilities.playerAvailabilityHome,
       input.probabilities.matchupHome, input.probabilities.upsetRisk,
       input.probabilities.upsetHomeAdjustment, input.probabilities.finalHome,
       input.probabilities.finalHome >= 0.5 ? input.homeTeam : input.awayTeam,
-      input.modelVersion, JSON.stringify(input.teamRatings),
+      input.modelVersion, input.modelHash, JSON.stringify(input.teamRatings),
       JSON.stringify(input.playerAvailability), JSON.stringify(input.depthChart),
       JSON.stringify(input.weatherRestTravel), JSON.stringify(input.teamEfficiency),
       JSON.stringify(input.specialists), JSON.stringify(input.sourceStatus),
     )
-    .run();
+    .run() as { meta?: { changes?: number } } | undefined;
 
-  return { captured: true, reason: null };
+  const changes = result?.meta?.changes;
+  return {
+    captured: true,
+    inserted: typeof changes === 'number' ? changes > 0 : null,
+    reason: null,
+  };
 }
 
 export type V7SettlementInput = {
@@ -113,7 +126,39 @@ type FrozenSnapshot = {
   away_team: string;
   home_team: string;
   final_home_probability: number;
+  market_home_probability: number | null;
+  football_home_probability: number | null;
+  matchup_home_probability: number | null;
+  upset_risk: string | null;
+  player_availability_json: string;
+  source_status_json: string;
 };
+
+function parseObject(value: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === 'object'
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function explicitAvailabilityWarnings(value: string) {
+  const payload = parseObject(value);
+  const entries = [payload.away, payload.home].flatMap((team) =>
+    Array.isArray(team) ? team : [],
+  );
+  return entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const record = entry as Record<string, unknown>;
+    const status = String(record.injuryDesignation ?? '').trim().toUpperCase();
+    return status === 'OUT'
+      ? [String(record.player ?? 'Unnamed player')]
+      : [];
+  });
+}
 
 /**
  * Settles every immutable V7 capture for a game with one result. This does
@@ -126,6 +171,9 @@ export async function settleV7ShadowSnapshots(
   const snapshotResult = await db
     .prepare(
       `SELECT id, away_team, home_team, final_home_probability
+              , market_home_probability, football_home_probability,
+                matchup_home_probability, upset_risk, player_availability_json,
+                source_status_json
        FROM v7_intelligence_snapshots
        WHERE season = ? AND game_key = ? AND settled_at IS NULL`,
     )
@@ -136,25 +184,64 @@ export async function settleV7ShadowSnapshots(
   const settledAt = new Date().toISOString();
   const outcomes = [];
   for (const snapshot of snapshots) {
-    const winner = input.homeScore > input.awayScore ? snapshot.home_team : snapshot.away_team;
+    const winner = input.homeScore > input.awayScore
+      ? snapshot.home_team
+      : input.awayScore > input.homeScore
+        ? snapshot.away_team
+        : 'TIE';
     const predictedWinner = snapshot.final_home_probability >= 0.5
       ? snapshot.home_team
       : snapshot.away_team;
-    const correct = predictedWinner === winner;
-    const actualWinnerProbability = winner === snapshot.home_team
-      ? snapshot.final_home_probability
-      : 1 - snapshot.final_home_probability;
+    const correct = winner !== 'TIE' && predictedWinner === winner;
+    const actualWinnerProbability = winner === 'TIE'
+      ? null
+      : winner === snapshot.home_team
+        ? snapshot.final_home_probability
+        : 1 - snapshot.final_home_probability;
     const taxonomy = input.validatedPregameFactor
       ? 'PREDICTABLE_MISS'
       : input.postKickoffEvents?.length
         ? 'IRREDUCIBLE_OR_IN_GAME_VARIANCE'
         : 'CALIBRATION_OR_UNCERTAINTY_MISS';
+    const availabilityWarnings = explicitAvailabilityWarnings(snapshot.player_availability_json);
     const postmortem = {
       taxonomy,
-      surprise: -Math.log(Math.max(0.000001, actualWinnerProbability)),
+      surprise: actualWinnerProbability === null
+        ? null
+        : -Math.log(Math.max(0.000001, actualWinnerProbability)),
       validatedPregameFactor: input.validatedPregameFactor ?? null,
       postKickoffEvents: input.postKickoffEvents ?? [],
       sourceQuality: input.sourceQuality,
+      causalReview: {
+        favoriteChoiceWrong: winner === 'TIE' ? 'TIE' : !correct,
+        confidenceTooHigh: !correct && Math.max(snapshot.final_home_probability, 1 - snapshot.final_home_probability) >= 0.7
+          ? 'POSSIBLE_REQUIRES_CALIBRATION_SAMPLE'
+          : 'NOT_ESTABLISHED',
+        playerAvailabilityWarning: availabilityWarnings.length
+          ? { explicitOutDesignations: availabilityWarnings }
+          : 'NONE_CAPTURED_OR_UNAVAILABLE',
+        matchupWarning: ['HIGH', 'EXTREME'].includes(snapshot.upset_risk ?? '')
+          ? snapshot.upset_risk
+          : 'NONE_CAPTURED_OR_UNAVAILABLE',
+        meaningfulLineMovement: 'UNAVAILABLE_NO_TIMESTAMPED_MARKET_SERIES',
+        randomTurnoverOrExplosiveVariance: 'UNAVAILABLE_NO_VALIDATED_POSTGAME_EVENT_SOURCE',
+        majorInGameInjury: input.postKickoffEvents?.length
+          ? input.postKickoffEvents
+          : 'UNAVAILABLE_NO_VALIDATED_IN_GAME_INJURY_SOURCE',
+        validPregameInformationWouldChangeWinner: input.validatedPregameFactor
+          ? 'POSSIBLE_RESEARCH_REVIEW_REQUIRED'
+          : 'NOT_ESTABLISHED',
+        validPregameInformationWouldOnlyLowerConfidence: 'NOT_ESTABLISHED',
+        resultIrreducible: input.postKickoffEvents?.length
+          ? 'POSSIBLE'
+          : 'UNDETERMINED',
+        frozenInputs: {
+          marketHomeProbability: snapshot.market_home_probability,
+          footballHomeProbability: snapshot.football_home_probability,
+          matchupHomeProbability: snapshot.matchup_home_probability,
+          sourceStatus: parseObject(snapshot.source_status_json),
+        },
+      },
       learningAction: 'RESEARCH_EVIDENCE_ONLY',
     };
     await db

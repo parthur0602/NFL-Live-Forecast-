@@ -22,7 +22,6 @@ import {
   captureProspectiveRows,
   prospectiveSeasonExam,
   PROSPECTIVE_SHADOW_LABEL,
-  type ProspectiveCaptureInput,
 } from '@/lib/prospective-model-exam';
 import {
   calculateV5Shadow,
@@ -30,6 +29,15 @@ import {
   V5_SHADOW_LABEL,
 } from '@/lib/v5-prospective-shadow';
 import { V5_PROSPECTIVE_ARTIFACT } from '@/lib/v5-prospective-artifact';
+import { V7_PROSPECTIVE_ARTIFACT } from '@/lib/v7-prospective-artifact';
+import {
+  calculateV7Shadow,
+  loadCurrentV7Efficiency,
+} from '@/lib/v7-prospective-shadow';
+import { collectCurrentPlayerAvailability } from '@/lib/player-availability-sources';
+import { savePlayerAvailability } from '@/lib/player-availability';
+import { saveV7ShadowSnapshot } from '@/lib/v7-shadow-snapshot';
+import { v7ProspectiveScoreboard } from '@/lib/v7-prospective-scoreboard';
 
 const SEASON = 2026;
 const SCHEDULE_SOURCE =
@@ -53,6 +61,9 @@ const NFLVERSE_TEAM_NAMES: Record<string, string> = {
   SEA: 'Seattle Seahawks', SF: 'San Francisco 49ers', TB: 'Tampa Bay Buccaneers',
   TEN: 'Tennessee Titans', WAS: 'Washington Commanders',
 };
+const TEAM_CODES = Object.fromEntries(
+  Object.entries(NFLVERSE_TEAM_NAMES).map(([code, team]) => [team, code]),
+) as Record<string, string>;
 
 type ScheduleEvent = {
   id?: string;
@@ -278,14 +289,19 @@ export async function GET(request: Request) {
       return NextResponse.json(await prospectiveSeasonExam(db, SEASON), {
         headers: { 'cache-control': 'no-store, max-age=0' },
       });
+    if (query.get('v7Report') === '1')
+      return NextResponse.json(await v7ProspectiveScoreboard(db, SEASON), {
+        headers: { 'cache-control': 'no-store, max-age=0' },
+      });
 
     // This endpoint accepts no probabilities from the browser. It obtains its
     // own schedule, market observation, V2 result, and frozen V5 calculation.
-    const [schedule, marketResult, learned, v5Efficiency] = await Promise.all([
+    const [schedule, marketResult, learned, v5Efficiency, v7Efficiency] = await Promise.all([
       scheduleForWeek(week),
       marketLinesForSlate(),
       safeModelState(),
       loadCurrentV5Efficiency(week),
+      loadCurrentV7Efficiency(week),
     ]);
     let canonicalRows: CanonicalSnapshot[] = [];
     try {
@@ -313,6 +329,11 @@ export async function GET(request: Request) {
     const preKickoffGames = games.filter((game) =>
       isPreKickoffCaptureEligible(game, capturedAt),
     );
+    const availability = await collectCurrentPlayerAvailability({
+      week,
+      teams: preKickoffGames.flatMap((game) => [game.awayTeam, game.homeTeam]),
+      observedAt: capturedAt,
+    });
     const marketForSlate = preKickoffGames.flatMap((game) => {
       const line = byGame.get(game.gameKey);
       return line
@@ -322,7 +343,7 @@ export async function GET(request: Request) {
     // A market feed outage must not hide the official weekly schedule and V2
     // picks. When no paired line is available, V2 retains its documented
     // football fallback and the response explicitly marks market data absent.
-    const pairs: ProspectiveCaptureInput[] = games.map((game) => {
+    const pairs = games.map((game) => {
       const market = byGame.get(game.gameKey) ?? null;
       const canonical = canonicalByGame.get(game.gameKey);
       const marketHomeProbability = canonical
@@ -348,6 +369,15 @@ export async function GET(request: Request) {
         marketHomeProbability,
         efficiencyRows: v5Efficiency.rows,
         unavailableReason: v5Efficiency.reason,
+      });
+      const v7 = calculateV7Shadow({
+        week,
+        homeTeam: game.homeTeam,
+        awayTeam: game.awayTeam,
+        marketHomeProbability,
+        v2HomeProbability: v2,
+        efficiencyRows: v7Efficiency.rows,
+        unavailableReason: v7Efficiency.reason,
       });
       return {
         season: SEASON,
@@ -384,6 +414,7 @@ export async function GET(request: Request) {
           source: v5Efficiency.reason ? null : '2026 nflverse stats_team weekly CSV',
         },
         v5Available: v5.available,
+        v7,
       };
     });
     // Keep displaying the full slate, but only preserve a market or paired
@@ -399,6 +430,13 @@ export async function GET(request: Request) {
       captureBucket: '',
     };
     let captureWarning: string | null = null;
+    let v7Capture = {
+      attempted: 0,
+      accepted: 0,
+      skippedAfterKickoff: 0,
+      inserted: 0,
+      duplicateOrExisting: 0,
+    };
     try {
       if (marketForSlate.length) await saveMarketSnapshots(marketForSlate);
       canonicalCapture = await captureVerifiedPredictions(
@@ -445,6 +483,81 @@ export async function GET(request: Request) {
         ),
         capturedAt,
       );
+      if (availability.signals.length) await savePlayerAvailability(availability.signals);
+      const v7Pairs = pairs.filter((pair, index) =>
+        isPreKickoffCaptureEligible(games[index]!, capturedAt),
+      );
+      v7Capture = {
+        attempted: pairs.length,
+        accepted: 0,
+        skippedAfterKickoff: pairs.length - v7Pairs.length,
+        inserted: 0,
+        duplicateOrExisting: 0,
+      };
+      for (const pair of v7Pairs) {
+        const saved = await saveV7ShadowSnapshot(db, {
+          season: SEASON,
+          week: pair.week,
+          gameKey: pair.gameKey,
+          awayTeam: pair.awayTeam,
+          homeTeam: pair.homeTeam,
+          scheduledKickoffAt: pair.scheduledKickoffAt!,
+          featureCutoffAt: capturedAt,
+          market: {
+            observedAt: pair.marketObservedAt,
+            source: pair.marketSource,
+            homeProbability: pair.marketHomeProbability,
+            awayMoneyline: byGame.get(pair.gameKey)?.awayMoneyline ?? null,
+            homeMoneyline: byGame.get(pair.gameKey)?.homeMoneyline ?? null,
+            homeSpread: byGame.get(pair.gameKey)?.homeSpread ?? null,
+            totalLine: byGame.get(pair.gameKey)?.totalLine ?? null,
+          },
+          v2: {
+            homeProbability: pair.v2HomeProbability,
+            predictedWinner: pair.v2PredictedWinner,
+            modelVersion: pair.v2ModelVersion,
+          },
+          probabilities: {
+            footballHome: pair.v7.footballHomeProbability,
+            playerAvailabilityHome: null,
+            matchupHome: pair.v7.matchupHomeProbability,
+            upsetRisk: pair.v7.upsetRisk,
+            upsetHomeAdjustment: pair.v7.upsetHomeAdjustment,
+            finalHome: pair.v7.finalHomeProbability,
+          },
+          modelVersion: V7_PROSPECTIVE_ARTIFACT.version,
+          modelHash: V7_PROSPECTIVE_ARTIFACT.artifactHash,
+          teamRatings: { v2FootballHomeProbability: footballProbabilityByGame.get(pair.gameKey) ?? null },
+          playerAvailability: {
+            away: availability.playerPayloadByTeam[TEAM_CODES[pair.awayTeam] ?? pair.awayTeam] ?? [],
+            home: availability.playerPayloadByTeam[TEAM_CODES[pair.homeTeam] ?? pair.homeTeam] ?? [],
+            limitations: availability.limitations,
+          },
+          depthChart: {
+            away: availability.depthPayloadByTeam[TEAM_CODES[pair.awayTeam] ?? pair.awayTeam] ?? [],
+            home: availability.depthPayloadByTeam[TEAM_CODES[pair.homeTeam] ?? pair.homeTeam] ?? [],
+          },
+          weatherRestTravel: {
+            status: 'UNAVAILABLE',
+            reason: 'No timestamped weather, rest, or travel source is connected to V7 yet.',
+          },
+          teamEfficiency: pair.v7.featurePayload,
+          specialists: {
+            productionInfluence: 0,
+            statuses: ['QB', 'skill-position availability', 'OL', 'pass rush', 'secondary', 'TE matchup', 'weather', 'rest/travel', 'turnover regression', 'explosive-play matchup', 'red zone', 'coaching/scheme', 'market movement'].map((code) => ({ code, productionWeight: 0 })),
+          },
+          sourceStatus: {
+            market: pair.marketSource ? 'AVAILABLE' : 'UNAVAILABLE',
+            teamEfficiency: v7Efficiency.reason ? 'UNAVAILABLE' : 'AVAILABLE',
+            playerAvailability: availability.sourceHealth,
+          },
+        }, new Date(capturedAt));
+        if (saved.captured) {
+          v7Capture.accepted += 1;
+          if (saved.inserted === true) v7Capture.inserted += 1;
+          else if (saved.inserted === false) v7Capture.duplicateOrExisting += 1;
+        }
+      }
     } catch (error) {
       captureWarning = error instanceof Error
         ? error.message
@@ -465,7 +578,13 @@ export async function GET(request: Request) {
           hash: V5_PROSPECTIVE_ARTIFACT.artifactHash,
           productionInfluence: 0,
         },
+        v7Artifact: {
+          version: V7_PROSPECTIVE_ARTIFACT.version,
+          hash: V7_PROSPECTIVE_ARTIFACT.artifactHash,
+          productionInfluence: 0,
+        },
         capture,
+        v7Capture,
         canonicalCapture,
         skippedAfterKickoff: games.length - preKickoffGames.length,
         // `pairs` is created from `games` above in the same order. Keep every
@@ -499,6 +618,15 @@ export async function GET(request: Request) {
           v5UnavailableReason: pair.v5Available
             ? null
             : (pair.v5FeaturePayload.unavailableReason ?? null),
+          v7ShadowProbability: pair.v7.finalHomeProbability,
+          v7ShadowPick: pair.v7.predictedWinner === 'home' ? pair.homeTeam : pair.awayTeam,
+          v7FootballProbability: pair.v7.footballHomeProbability,
+          v7MatchupProbability: pair.v7.matchupHomeProbability,
+          v7UpsetRisk: pair.v7.upsetRisk,
+          v7UpsetHomeAdjustment: pair.v7.upsetHomeAdjustment,
+          v7Available: pair.v7.available,
+          v7UnavailableReason: pair.v7.reason,
+          v7FeatureDataThroughWeek: pair.v7.featureDataThroughWeek,
           market: (() => {
             const line = byGame.get(pair.gameKey);
             if (!line) return null;

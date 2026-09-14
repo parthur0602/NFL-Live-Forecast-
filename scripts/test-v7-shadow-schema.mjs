@@ -1,8 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 
 const db = new DatabaseSync(':memory:');
-const migration = await readFile('drizzle/0006_v7_intelligence_shadow.sql', 'utf8');
+const migrations = (await readdir('drizzle'))
+  .filter((name) => /^\d{4}_.*\.sql$/.test(name))
+  .sort();
+const numbers = migrations.map((name) => name.slice(0, 4));
+const duplicates = numbers.filter((number, index) => numbers.indexOf(number) !== index);
+if (duplicates.length)
+  throw new Error(`Duplicate migration numbers: ${[...new Set(duplicates)].join(', ')}`);
+if (migrations.includes('0006_v7_intelligence_shadow.sql') || !migrations.includes('0007_v7_intelligence_shadow.sql'))
+  throw new Error('V7 migration must be numbered 0007 with no legacy 0006 file.');
+const migration = await readFile('drizzle/0007_v7_intelligence_shadow.sql', 'utf8');
 for (const statement of migration.split('--> statement-breakpoint').map((value) => value.trim()).filter(Boolean))
   db.exec(statement);
 
@@ -13,15 +22,23 @@ for (const name of [
   'uq_v7_intelligence_game_bucket', 'idx_v7_intelligence_season_week',
   'idx_v7_intelligence_game_time', 'idx_v7_intelligence_unsettled',
 ]) if (!indexes.some((index) => index.name === name)) throw new Error(`Missing V7 index ${name}.`);
+const columns = db.prepare('PRAGMA table_info(v7_intelligence_snapshots)').all().map((column) => column.name);
+for (const name of [
+  'v2_home_probability', 'v2_predicted_winner', 'v2_model_version', 'model_hash',
+  'team_ratings_json', 'player_availability_json', 'depth_chart_json',
+  'weather_rest_travel_json', 'team_efficiency_json', 'specialist_outputs_json',
+  'source_status_json',
+]) if (!columns.includes(name)) throw new Error(`Missing V7 immutable snapshot field ${name}.`);
 
 const insert = db.prepare(`INSERT INTO v7_intelligence_snapshots (
   season, week, game_key, away_team, home_team, scheduled_kickoff_at,
   capture_bucket, captured_at, feature_cutoff_at, final_home_probability,
-  predicted_winner, model_version, team_ratings_json, player_availability_json,
+  predicted_winner, model_version, model_hash, v2_home_probability,
+  v2_predicted_winner, v2_model_version, team_ratings_json, player_availability_json,
   depth_chart_json, weather_rest_travel_json, team_efficiency_json,
   specialist_outputs_json, source_status_json
 ) VALUES (2026, 2, 'TEST', 'AWAY', 'HOME', '2026-09-20T17:00:00Z', ?,
-  '2026-09-20T12:00:00Z', '2026-09-20T12:00:00Z', .55, 'HOME', 'V7',
+  '2026-09-20T12:00:00Z', '2026-09-20T12:00:00Z', .55, 'HOME', 'V7', 'hash', .55, 'HOME', 'V2',
   '{}', '{}', '{}', '{}', '{}', '{}', '{}')`);
 insert.run('2026-09-20T12:00:00Z');
 let duplicateRejected = false;
@@ -32,6 +49,7 @@ const values = db.prepare('SELECT COUNT(*) AS count, MIN(production_influence) A
 if (values.count !== 2 || values.influence !== 0 || values.maxInfluence !== 0)
   throw new Error('V7 migration did not preserve research-only production influence.');
 console.log('V7 shadow migration test passed.');
+console.log('Migration numbering: PASS');
 console.log('Immutable hourly dedupe: PASS');
 console.log('Multiple pre-kickoff buckets: PASS');
 console.log('Production influence remains 0: PASS');

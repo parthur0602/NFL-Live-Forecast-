@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export const SEASONS = [2021, 2022, 2023, 2024, 2025];
 export const SCHEDULE_URL = 'https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv';
@@ -217,7 +218,7 @@ function transform(x, scaler) {
   return x.map((value, index) => (value - scaler.means[index]) / scaler.scales[index]);
 }
 
-function fitLogistic(rows, { marketOffset }) {
+export function fitLogistic(rows, { marketOffset }) {
   const scaler = standardizer(rows);
   const zRows = rows.map((row) => ({ ...row, z: transform(row.x, scaler) }));
   let intercept = 0;
@@ -240,7 +241,7 @@ function fitLogistic(rows, { marketOffset }) {
   return { intercept, beta, scaler, marketOffset };
 }
 
-function score(model, x) {
+export function score(model, x) {
   const z = transform(x, model.scaler);
   return model.intercept + model.beta.reduce((sum, value, index) => sum + value * z[index], 0);
 }
@@ -307,6 +308,61 @@ function upsetRisk(game) {
     : gap >= thresholds.high ? 'HIGH'
       : gap >= thresholds.moderate ? 'MODERATE' : 'LOW';
   return { level, adjustment: marketFavoriteHome ? -Math.max(0, gap) : Math.max(0, gap), favorite: marketFavoriteHome ? game.home : game.away };
+}
+
+function favoriteOutcome(row) {
+  const favoriteIsHome = row.marketProbability >= 0.5;
+  const favoriteProbability = Math.max(row.marketProbability, 1 - row.marketProbability);
+  const footballFavoriteProbability = favoriteIsHome ? row.footballProbability : 1 - row.footballProbability;
+  const favoriteWon = (row.y === 1) === favoriteIsHome;
+  return { favoriteIsHome, favoriteProbability, footballFavoriteProbability, favoriteWon };
+}
+
+function timingBucket(week) {
+  if (week <= 4) return 'Weeks 1–4';
+  if (week <= 9) return 'Weeks 5–9';
+  if (week <= 14) return 'Weeks 10–14';
+  return 'Weeks 15–18';
+}
+
+function detectorMetrics(rows, predicate) {
+  const flagged = rows.filter(predicate);
+  const losses = rows.filter((row) => !favoriteOutcome(row).favoriteWon);
+  const correctWarnings = flagged.filter((row) => !favoriteOutcome(row).favoriteWon).length;
+  const falseWarnings = flagged.length - correctWarnings;
+  const comparableWins = rows.length - losses.length;
+  return {
+    alerts: flagged.length,
+    correctWarnings,
+    falseWarnings,
+    precision: flagged.length ? correctWarnings / flagged.length : null,
+    recall: losses.length ? correctWarnings / losses.length : null,
+    falsePositiveRate: comparableWins ? falseWarnings / comparableWins : null,
+    probabilityImpact: 0,
+    brierImpact: 0,
+    logLossImpact: 0,
+    winnerPickFlips: 0,
+    netWinnerAccuracyImpact: 0,
+  };
+}
+
+export function matchedFavoriteControls(rows, target) {
+  const targetFavorite = favoriteOutcome(target);
+  return rows.filter((candidate) => {
+    const control = favoriteOutcome(candidate);
+    return control.favoriteWon
+      && control.favoriteIsHome === targetFavorite.favoriteIsHome
+      && Math.abs(control.favoriteProbability - targetFavorite.favoriteProbability) < 0.05
+      && timingBucket(candidate.week) === timingBucket(target.week)
+      && Math.abs(control.footballFavoriteProbability - targetFavorite.footballFavoriteProbability) < 0.1;
+  }).slice(0, 30).map((control) => ({
+    season: control.season,
+    week: control.week,
+    gameId: control.gameId,
+    favorite: control.upset.favorite,
+    marketFavoriteProbability: favoriteOutcome(control).favoriteProbability,
+    footballFavoriteProbability: favoriteOutcome(control).footballFavoriteProbability,
+  }));
 }
 
 function featureReasons(row) {
@@ -455,6 +511,14 @@ export function buildV7Result(data) {
       flaggedUpsets: upsetLosses.filter((row) => row.upset.level !== 'LOW').length,
       falseUpsetFlags: flagged.filter((row) => row.upset.favorite === (row.y ? row.home : row.away)).length,
       flaggedGames: flagged.length,
+      strictUnderdogDisagreement: {
+        definition: 'Market favorite is at least 70%, while the independently fit football model selects the underdog. This signal never changes a V2/V7 pick.',
+        metrics: detectorMetrics(
+          bigFavorites,
+          (row) => favoriteOutcome(row).footballFavoriteProbability < 0.5,
+        ),
+        matchedControlPolicy: 'Controls match favorite home/road status, market probability within five points, season timing bucket, and independent football-favorite probability within ten points. QB status, injury count, rest, and market movement are unavailable in this historical source and are not claimed as matches.',
+      },
     },
     researchLedger: oos.map((row) => ({
       season: row.season,
@@ -481,6 +545,10 @@ export function buildV7Result(data) {
         depthChart: 'UNAVAILABLE_NO_TIMESTAMPED_HISTORICAL_SOURCE',
         weatherRestTravel: 'UNAVAILABLE_NO_TIMESTAMPED_HISTORICAL_SOURCE',
       },
+      disagreement: {
+        v2MarketVsV7Points: Math.abs(row[referenceKey] - row.marketProbability) * 100,
+        winnerFlip: (row[referenceKey] >= 0.5) !== (row.marketProbability >= 0.5),
+      },
     })),
     bySeason: SEASONS.map((season) => {
       const rows = oos.filter((row) => row.season === season);
@@ -488,7 +556,7 @@ export function buildV7Result(data) {
     }).filter((row) => row.market.games),
     prospectiveContract: {
       table: 'v7_intelligence_snapshots',
-      migration: 'drizzle/0006_v7_intelligence_shadow.sql',
+      migration: 'drizzle/0007_v7_intelligence_shadow.sql',
       dedupe: 'season + game_key + hourly capture_bucket',
       postKickoffCapture: 'rejected',
       productionInfluence: 0,
@@ -498,6 +566,38 @@ export function buildV7Result(data) {
       : 'A nonzero V7 candidate is descriptively best in this chronological replay. It remains shadow-only pending prospective, timestamp-matched validation and stability testing.',
   };
   return { output, oos, featureRows, referenceKey };
+}
+
+/** A frozen research artifact for prospective V7 calculation; never V2. */
+export function buildV7ProspectiveArtifact(data) {
+  const { featureRows } = buildV7Result(data);
+  const football = fitLogistic(featureRows, { marketOffset: false });
+  const residual = fitLogistic(featureRows, { marketOffset: true });
+  const artifact = {
+    version: `${V7_CONFIG.version}-PROSPECTIVE`,
+    status: 'SHADOW_ONLY',
+    productionInfluence: 0,
+    featureOrder: FEATURE_NAMES,
+    football: {
+      intercept: football.intercept,
+      coefficients: football.beta,
+      standardization: football.scaler,
+    },
+    residual: {
+      intercept: residual.intercept,
+      coefficients: residual.beta,
+      standardization: residual.scaler,
+      appliedScale: V7_CONFIG.referenceScale,
+    },
+    trainingSeasons: SEASONS,
+    trainingGames: featureRows.length,
+    temporalPolicy: 'Current-season regular-season team statistics must be from weeks strictly before the forecast week. Week 1 has no eligible current-season team sample.',
+    unavailableInputs: ['timestamped historical player availability', 'depth rank', 'starter confirmation', 'weather observation history', 'market movement history'],
+  };
+  return {
+    ...artifact,
+    artifactHash: createHash('sha256').update(JSON.stringify(artifact)).digest('hex'),
+  };
 }
 
 export function gamePostgameStats(teamRows, gameId, home, away) {

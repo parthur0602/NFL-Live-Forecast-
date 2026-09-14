@@ -2,10 +2,12 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 
 // Minimal D1-compatible adapter for the local Node fallback. Production still
 // uses the real Cloudflare D1 binding through cloudflare:workers.
-const database = new DatabaseSync(':memory:');
+// Set NFL_FORECAST_LOCAL_D1_PATH for a file-backed preview database. The
+// default remains ephemeral so ordinary local app runs are unchanged.
+const database = new DatabaseSync(process.env.NFL_FORECAST_LOCAL_D1_PATH ?? ':memory:');
 
 database.exec(`
-  CREATE TABLE model_adjustments (
+  CREATE TABLE IF NOT EXISTS model_adjustments (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -15,11 +17,11 @@ database.exec(`
     sample_size INTEGER NOT NULL,
     created_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX uq_model_adjustments_week_kind
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_model_adjustments_week_kind
     ON model_adjustments (season, week, kind);
-  CREATE INDEX idx_model_adjustments_season_kind
+  CREATE INDEX IF NOT EXISTS idx_model_adjustments_season_kind
     ON model_adjustments (season, kind);
-  CREATE TABLE prediction_snapshots (
+  CREATE TABLE IF NOT EXISTS prediction_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -44,13 +46,13 @@ database.exec(`
     home_cover_probability REAL,
     model_version TEXT
   );
-  CREATE UNIQUE INDEX uq_prediction_snapshots_game
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_prediction_snapshots_game
     ON prediction_snapshots (season, game_key);
-  CREATE INDEX idx_prediction_snapshots_season_week
+  CREATE INDEX IF NOT EXISTS idx_prediction_snapshots_season_week
     ON prediction_snapshots (season, week);
-  CREATE INDEX idx_prediction_snapshots_unsettled
+  CREATE INDEX IF NOT EXISTS idx_prediction_snapshots_unsettled
     ON prediction_snapshots (season, settled_at);
-  CREATE TABLE forecast_ledger (
+  CREATE TABLE IF NOT EXISTS forecast_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -76,13 +78,13 @@ database.exec(`
     winner TEXT,
     correct INTEGER
   );
-  CREATE UNIQUE INDEX uq_forecast_ledger_game_bucket
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_forecast_ledger_game_bucket
     ON forecast_ledger (season, game_key, capture_bucket);
-  CREATE INDEX idx_forecast_ledger_game_time
+  CREATE INDEX IF NOT EXISTS idx_forecast_ledger_game_time
     ON forecast_ledger (season, game_key, captured_at);
-  CREATE INDEX idx_forecast_ledger_season_week
+  CREATE INDEX IF NOT EXISTS idx_forecast_ledger_season_week
     ON forecast_ledger (season, week);
-  CREATE TABLE prospective_model_snapshots (
+  CREATE TABLE IF NOT EXISTS prospective_model_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -114,15 +116,15 @@ database.exec(`
     v2_correct INTEGER,
     v5_correct INTEGER
   );
-  CREATE UNIQUE INDEX uq_prospective_model_game_bucket
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_prospective_model_game_bucket
     ON prospective_model_snapshots (season, game_key, capture_bucket);
-  CREATE INDEX idx_prospective_model_season_week
+  CREATE INDEX IF NOT EXISTS idx_prospective_model_season_week
     ON prospective_model_snapshots (season, week);
-  CREATE INDEX idx_prospective_model_game_time
+  CREATE INDEX IF NOT EXISTS idx_prospective_model_game_time
     ON prospective_model_snapshots (season, game_key, captured_at);
-  CREATE INDEX idx_prospective_model_unsettled
+  CREATE INDEX IF NOT EXISTS idx_prospective_model_unsettled
     ON prospective_model_snapshots (season, settled_at);
-  CREATE TABLE game_postmortems (
+  CREATE TABLE IF NOT EXISTS game_postmortems (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     snapshot_id INTEGER NOT NULL,
     season INTEGER NOT NULL,
@@ -143,10 +145,10 @@ database.exec(`
     data_quality TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX uq_game_postmortems_snapshot ON game_postmortems (snapshot_id);
-  CREATE INDEX idx_game_postmortems_season_week ON game_postmortems (season, week);
-  CREATE INDEX idx_game_postmortems_severity ON game_postmortems (error_severity);
-  CREATE TABLE error_memory (
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_game_postmortems_snapshot ON game_postmortems (snapshot_id);
+  CREATE INDEX IF NOT EXISTS idx_game_postmortems_season_week ON game_postmortems (season, week);
+  CREATE INDEX IF NOT EXISTS idx_game_postmortems_severity ON game_postmortems (error_severity);
+  CREATE TABLE IF NOT EXISTS error_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     snapshot_id INTEGER NOT NULL,
     game_key TEXT NOT NULL,
@@ -155,9 +157,9 @@ database.exec(`
     lesson TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX uq_error_memory_snapshot ON error_memory (snapshot_id);
-  CREATE INDEX idx_error_memory_severity ON error_memory (severity);
-  CREATE TABLE success_memory (
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_error_memory_snapshot ON error_memory (snapshot_id);
+  CREATE INDEX IF NOT EXISTS idx_error_memory_severity ON error_memory (severity);
+  CREATE TABLE IF NOT EXISTS success_memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     snapshot_id INTEGER NOT NULL,
     game_key TEXT NOT NULL,
@@ -165,9 +167,9 @@ database.exec(`
     lesson TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX uq_success_memory_snapshot ON success_memory (snapshot_id);
-  CREATE INDEX idx_success_memory_game ON success_memory (game_key);
-  CREATE TABLE specialist_registry (
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_success_memory_snapshot ON success_memory (snapshot_id);
+  CREATE INDEX IF NOT EXISTS idx_success_memory_game ON success_memory (game_key);
+  CREATE TABLE IF NOT EXISTS specialist_registry (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     code TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -175,8 +177,8 @@ database.exec(`
     evidence TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX uq_specialist_registry_code ON specialist_registry (code);
-  CREATE TABLE weekly_learning_runs (
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_specialist_registry_code ON specialist_registry (code);
+  CREATE TABLE IF NOT EXISTS weekly_learning_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -188,9 +190,9 @@ database.exec(`
     insight TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX uq_weekly_learning_runs
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_weekly_learning_runs
     ON weekly_learning_runs (season, week);
-  CREATE TABLE market_snapshots (
+  CREATE TABLE IF NOT EXISTS market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -207,13 +209,13 @@ database.exec(`
     over_odds INTEGER,
     under_odds INTEGER
   );
-  CREATE UNIQUE INDEX uq_market_snapshots_source_game_time
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_market_snapshots_source_game_time
     ON market_snapshots (source, game_key, observed_at);
-  CREATE INDEX idx_market_snapshots_season_week
+  CREATE INDEX IF NOT EXISTS idx_market_snapshots_season_week
     ON market_snapshots (season, week);
-  CREATE INDEX idx_market_snapshots_game_time
+  CREATE INDEX IF NOT EXISTS idx_market_snapshots_game_time
     ON market_snapshots (game_key, observed_at);
-  CREATE TABLE football_state_snapshots (
+  CREATE TABLE IF NOT EXISTS football_state_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     team TEXT NOT NULL,
@@ -228,15 +230,15 @@ database.exec(`
     payload_json TEXT NOT NULL,
     eligible_for_model INTEGER DEFAULT 0 NOT NULL
   );
-  CREATE UNIQUE INDEX uq_football_state_signal_bucket
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_football_state_signal_bucket
     ON football_state_snapshots (
       season, team, state_type, subject, source, capture_bucket
     );
-  CREATE INDEX idx_football_state_team_time
+  CREATE INDEX IF NOT EXISTS idx_football_state_team_time
     ON football_state_snapshots (season, team, observed_at);
-  CREATE INDEX idx_football_state_type_time
+  CREATE INDEX IF NOT EXISTS idx_football_state_type_time
     ON football_state_snapshots (season, state_type, observed_at);
-  CREATE TABLE team_efficiency_snapshots (
+  CREATE TABLE IF NOT EXISTS team_efficiency_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -258,13 +260,13 @@ database.exec(`
     payload_json TEXT NOT NULL,
     eligible_for_model INTEGER DEFAULT 1 NOT NULL
   );
-  CREATE UNIQUE INDEX uq_team_efficiency_team_week_bucket
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_team_efficiency_team_week_bucket
     ON team_efficiency_snapshots (season, week, team, capture_bucket);
-  CREATE INDEX idx_team_efficiency_team_time
+  CREATE INDEX IF NOT EXISTS idx_team_efficiency_team_time
     ON team_efficiency_snapshots (season, team, observed_at);
-  CREATE INDEX idx_team_efficiency_week
+  CREATE INDEX IF NOT EXISTS idx_team_efficiency_week
     ON team_efficiency_snapshots (season, week);
-  CREATE TABLE player_availability_snapshots (
+  CREATE TABLE IF NOT EXISTS player_availability_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -285,15 +287,15 @@ database.exec(`
     payload_json TEXT NOT NULL,
     eligible_for_model INTEGER DEFAULT 0 NOT NULL
   );
-  CREATE UNIQUE INDEX uq_player_availability_signal_bucket
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_player_availability_signal_bucket
     ON player_availability_snapshots (
       season, week, team, player_name, source, capture_bucket
     );
-  CREATE INDEX idx_player_availability_team_time
+  CREATE INDEX IF NOT EXISTS idx_player_availability_team_time
     ON player_availability_snapshots (season, team, observed_at);
-  CREATE INDEX idx_player_availability_position_time
+  CREATE INDEX IF NOT EXISTS idx_player_availability_position_time
     ON player_availability_snapshots (season, position, observed_at);
-  CREATE TABLE v7_intelligence_snapshots (
+  CREATE TABLE IF NOT EXISTS v7_intelligence_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -311,6 +313,9 @@ database.exec(`
     home_moneyline INTEGER,
     home_spread REAL,
     total_line REAL,
+    v2_home_probability REAL NOT NULL,
+    v2_predicted_winner TEXT NOT NULL,
+    v2_model_version TEXT NOT NULL,
     football_home_probability REAL,
     player_availability_home_probability REAL,
     matchup_home_probability REAL,
@@ -319,6 +324,7 @@ database.exec(`
     final_home_probability REAL NOT NULL,
     predicted_winner TEXT NOT NULL,
     model_version TEXT NOT NULL,
+    model_hash TEXT NOT NULL,
     team_ratings_json TEXT NOT NULL,
     player_availability_json TEXT NOT NULL,
     depth_chart_json TEXT NOT NULL,
@@ -334,13 +340,13 @@ database.exec(`
     correct INTEGER,
     postmortem_json TEXT
   );
-  CREATE UNIQUE INDEX uq_v7_intelligence_game_bucket
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_v7_intelligence_game_bucket
     ON v7_intelligence_snapshots (season, game_key, capture_bucket);
-  CREATE INDEX idx_v7_intelligence_season_week
+  CREATE INDEX IF NOT EXISTS idx_v7_intelligence_season_week
     ON v7_intelligence_snapshots (season, week);
-  CREATE INDEX idx_v7_intelligence_game_time
+  CREATE INDEX IF NOT EXISTS idx_v7_intelligence_game_time
     ON v7_intelligence_snapshots (season, game_key, captured_at);
-  CREATE INDEX idx_v7_intelligence_unsettled
+  CREATE INDEX IF NOT EXISTS idx_v7_intelligence_unsettled
     ON v7_intelligence_snapshots (season, settled_at);
 `);
 

@@ -3,6 +3,7 @@ import {
   buildV7Result,
   gamePostgameStats,
   loadResearchData,
+  matchedFavoriteControls,
   parseCsv,
   special2026Reviews,
   writeJson,
@@ -32,12 +33,16 @@ const marketUpsets = oos
     playerAbsences: 'UNAVAILABLE: no timestamped historical availability archive.',
     marketMovement: 'UNAVAILABLE: closing-line proxy has no observation history.',
     inGameInjuries: 'UNAVAILABLE: do not infer from the result.',
-    matchedControls: 'Research pending: match variables requiring timestamped availability were unavailable.',
+    matchedControls: {
+      controls: matchedFavoriteControls(oos, row),
+      unavailableMatchVariables: ['QB status', 'injury count', 'rest', 'market movement', 'timestamped spread history'],
+    },
   }));
 const audit = {
   version: output.version, generatedAt: new Date().toISOString(), status: 'SHADOW_ONLY', productionInfluence: 0,
   guardrails: output.caveats,
   historical: {
+    strictDetector: output.bigFavorites.strictUnderdogDisagreement,
     favoriteBuckets: [
       [0.7, 0.75], [0.75, 0.8], [0.8, 0.85], [0.85, 1.001],
     ].map(([lower, upper]) => {

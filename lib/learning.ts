@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { DEFAULT_LEARNED_MODEL, type LearnedModelState } from '@/lib/forecast';
 import { settleProspectiveRows } from '@/lib/prospective-model-exam';
+import { settleV7ShadowSnapshots } from '@/lib/v7-shadow-snapshot';
 
 const SEASON = 2026;
 const MAX_HOME_FIELD_ADJUSTMENT = 0.5;
@@ -366,7 +367,13 @@ async function settleWeek(week: number) {
     )
     .bind(SEASON, week)
     .first<{ count: number }>();
-  if (!snapshots.length && !(prospective?.count ?? 0)) return;
+  const v7 = await database
+    .prepare(
+      `SELECT COUNT(*) AS count FROM v7_intelligence_snapshots WHERE season = ? AND week = ? AND winner IS NULL`,
+    )
+    .bind(SEASON, week)
+    .first<{ count: number }>();
+  if (!snapshots.length && !(prospective?.count ?? 0) && !(v7?.count ?? 0)) return;
   const results = await resultsForWeek(week);
   const byMatchup = new Map(
     results.map((result) => [`${result.away}__${result.home}`, result]),
@@ -469,6 +476,19 @@ async function settleWeek(week: number) {
   // Paired V2/V5 exam rows settle beside, but never feed into, canonical
   // prediction snapshots, weekly learning, or error/success memory.
   if (prospective?.count) await settleProspectiveRows(database, SEASON, week, results, settledAt);
+  // V7 uses the same scores but is kept in its own immutable shadow ledger.
+  // It intentionally receives no canonical-learning, weight, or betting path.
+  if (v7?.count) {
+    for (const result of results) {
+      await settleV7ShadowSnapshots(database, {
+        season: SEASON,
+        gameKey: `${result.away}__${result.home}`,
+        awayScore: result.awayScore,
+        homeScore: result.homeScore,
+        sourceQuality: 'UNAVAILABLE',
+      });
+    }
+  }
 }
 
 function insightFor(
@@ -650,9 +670,11 @@ export async function syncAndLearn() {
           SELECT week FROM prediction_snapshots WHERE season = ? AND winner IS NULL
           UNION
           SELECT week FROM prospective_model_snapshots WHERE season = ? AND winner IS NULL
+          UNION
+          SELECT week FROM v7_intelligence_snapshots WHERE season = ? AND winner IS NULL
         ) ORDER BY week`,
       )
-      .bind(SEASON, SEASON)
+      .bind(SEASON, SEASON, SEASON)
       .all<{ week: number }>()
   ).results;
   for (const { week } of pendingWeeks) {
