@@ -146,6 +146,68 @@ export const prospectiveModelSnapshots = sqliteTable(
   ],
 );
 
+// V7 research records are an immutable, fuller pre-kickoff evidence packet.
+// They are deliberately separate from predictionSnapshots and the V2/V5 exam:
+// V7 is a shadow challenger and must never affect the canonical pick ledger.
+export const v7IntelligenceSnapshots = sqliteTable(
+  'v7_intelligence_snapshots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    season: integer('season').notNull(),
+    week: integer('week').notNull(),
+    gameKey: text('game_key').notNull(),
+    awayTeam: text('away_team').notNull(),
+    homeTeam: text('home_team').notNull(),
+    scheduledKickoffAt: text('scheduled_kickoff_at').notNull(),
+    captureBucket: text('capture_bucket').notNull(),
+    capturedAt: text('captured_at').notNull(),
+    featureCutoffAt: text('feature_cutoff_at').notNull(),
+    marketObservedAt: text('market_observed_at'),
+    marketSource: text('market_source'),
+    marketHomeProbability: real('market_home_probability'),
+    awayMoneyline: integer('away_moneyline'),
+    homeMoneyline: integer('home_moneyline'),
+    homeSpread: real('home_spread'),
+    totalLine: real('total_line'),
+    footballHomeProbability: real('football_home_probability'),
+    playerAvailabilityHomeProbability: real('player_availability_home_probability'),
+    matchupHomeProbability: real('matchup_home_probability'),
+    upsetRisk: text('upset_risk'),
+    upsetHomeAdjustment: real('upset_home_adjustment'),
+    finalHomeProbability: real('final_home_probability').notNull(),
+    predictedWinner: text('predicted_winner').notNull(),
+    modelVersion: text('model_version').notNull(),
+    teamRatingsJson: text('team_ratings_json').notNull(),
+    playerAvailabilityJson: text('player_availability_json').notNull(),
+    depthChartJson: text('depth_chart_json').notNull(),
+    weatherRestTravelJson: text('weather_rest_travel_json').notNull(),
+    teamEfficiencyJson: text('team_efficiency_json').notNull(),
+    specialistOutputsJson: text('specialist_outputs_json').notNull(),
+    sourceStatusJson: text('source_status_json').notNull(),
+    productionInfluence: real('production_influence').notNull().default(0),
+    settledAt: text('settled_at'),
+    awayScore: integer('away_score'),
+    homeScore: integer('home_score'),
+    winner: text('winner'),
+    correct: integer('correct', { mode: 'boolean' }),
+    postmortemJson: text('postmortem_json'),
+  },
+  (table) => [
+    uniqueIndex('uq_v7_intelligence_game_bucket').on(
+      table.season,
+      table.gameKey,
+      table.captureBucket,
+    ),
+    index('idx_v7_intelligence_season_week').on(table.season, table.week),
+    index('idx_v7_intelligence_game_time').on(
+      table.season,
+      table.gameKey,
+      table.capturedAt,
+    ),
+    index('idx_v7_intelligence_unsettled').on(table.season, table.settledAt),
+  ],
+);
+
 // Timestamped research evidence only. Unstructured reports are deliberately
 // ineligible for production forecasts until a specialist proves incremental
 // value in chronological, timestamp-matched evaluation.

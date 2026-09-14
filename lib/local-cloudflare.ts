@@ -293,6 +293,55 @@ database.exec(`
     ON player_availability_snapshots (season, team, observed_at);
   CREATE INDEX idx_player_availability_position_time
     ON player_availability_snapshots (season, position, observed_at);
+  CREATE TABLE v7_intelligence_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    game_key TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    home_team TEXT NOT NULL,
+    scheduled_kickoff_at TEXT NOT NULL,
+    capture_bucket TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    feature_cutoff_at TEXT NOT NULL,
+    market_observed_at TEXT,
+    market_source TEXT,
+    market_home_probability REAL,
+    away_moneyline INTEGER,
+    home_moneyline INTEGER,
+    home_spread REAL,
+    total_line REAL,
+    football_home_probability REAL,
+    player_availability_home_probability REAL,
+    matchup_home_probability REAL,
+    upset_risk TEXT,
+    upset_home_adjustment REAL,
+    final_home_probability REAL NOT NULL,
+    predicted_winner TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    team_ratings_json TEXT NOT NULL,
+    player_availability_json TEXT NOT NULL,
+    depth_chart_json TEXT NOT NULL,
+    weather_rest_travel_json TEXT NOT NULL,
+    team_efficiency_json TEXT NOT NULL,
+    specialist_outputs_json TEXT NOT NULL,
+    source_status_json TEXT NOT NULL,
+    production_influence REAL DEFAULT 0 NOT NULL,
+    settled_at TEXT,
+    away_score INTEGER,
+    home_score INTEGER,
+    winner TEXT,
+    correct INTEGER,
+    postmortem_json TEXT
+  );
+  CREATE UNIQUE INDEX uq_v7_intelligence_game_bucket
+    ON v7_intelligence_snapshots (season, game_key, capture_bucket);
+  CREATE INDEX idx_v7_intelligence_season_week
+    ON v7_intelligence_snapshots (season, week);
+  CREATE INDEX idx_v7_intelligence_game_time
+    ON v7_intelligence_snapshots (season, game_key, captured_at);
+  CREATE INDEX idx_v7_intelligence_unsettled
+    ON v7_intelligence_snapshots (season, settled_at);
 `);
 
 class LocalStatement {
