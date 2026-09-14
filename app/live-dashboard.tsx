@@ -3,30 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
-  ArrowDownRight,
-  ArrowUpRight,
-  BarChart3,
-  BrainCircuit,
   CalendarClock,
-  CheckCircle2,
   ChevronRight,
   CircleAlert,
   CloudOff,
-  Database,
-  Eye,
   Gauge,
-  Info,
-  LoaderCircle,
   Radio,
   RefreshCw,
   ShieldCheck,
-  TrendingUp,
   Trophy,
-  XCircle,
 } from 'lucide-react';
 import {
-  Area,
-  AreaChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -35,7 +22,6 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -171,7 +157,6 @@ type Learning = {
 };
 
 const AUTO_REFRESH_MS = 45_000;
-const RESEARCH_REFRESH_MS = 5 * 60_000;
 
 function asNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -270,6 +255,55 @@ function confidence(probability: number) {
   if (favorite >= 0.6) return 'Medium';
   return 'Low';
 }
+type RankedWeeklyPick = {
+  game: SlateGame;
+  rank: number;
+  winnerProbability: number;
+};
+
+function rankWeeklyPicks(games: SlateGame[]): RankedWeeklyPick[] {
+  // Every game receives exactly one rank. Ties have a stable kickoff/key
+  // tiebreaker so the board never gives two games the same confidence number.
+  return [...games]
+    .sort((left, right) => {
+      const confidenceDifference =
+        officialWinnerProbability(left) - officialWinnerProbability(right);
+      if (confidenceDifference) return confidenceDifference;
+      const leftKickoff = Date.parse(left.scheduledKickoffAt ?? '');
+      const rightKickoff = Date.parse(right.scheduledKickoffAt ?? '');
+      const safeLeft = Number.isFinite(leftKickoff)
+        ? leftKickoff
+        : Number.MAX_SAFE_INTEGER;
+      const safeRight = Number.isFinite(rightKickoff)
+        ? rightKickoff
+        : Number.MAX_SAFE_INTEGER;
+      return safeLeft - safeRight || left.gameKey.localeCompare(right.gameKey);
+    })
+    .map((game, index) => ({
+      game,
+      rank: index + 1,
+      winnerProbability: officialWinnerProbability(game),
+    }));
+}
+
+function isMondayNightFootball(game: SlateGame) {
+  if (!game.scheduledKickoffAt) return false;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+      hour: 'numeric',
+      hourCycle: 'h23',
+      timeZone: 'America/New_York',
+    }).formatToParts(new Date(game.scheduledKickoffAt));
+    const weekday = parts.find((part) => part.type === 'weekday')?.value;
+    const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+    // NFL Monday night kickoffs are evening Eastern Time. This deliberately
+    // excludes a rare Monday afternoon game from the MNF total card.
+    return weekday === 'Monday' && Number.isFinite(hour) && hour >= 18;
+  } catch {
+    return false;
+  }
+}
 function parseJson(value: unknown) {
   if (typeof value !== 'string') return null;
   try {
@@ -343,7 +377,6 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const [detail, setDetail] = useState<DashboardData | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [atlasSort, setAtlasSort] = useState<'positive' | 'negative' | 'sample' | 'z'>('positive');
-  const [benchmarkOpen, setBenchmarkOpen] = useState(false);
   const [researchOpen, setResearchOpen] = useState(false);
   const slateRequestRef = useRef<{ week: number; request: Promise<Slate> } | null>(null);
   const slateRequestIdRef = useRef(0);
@@ -400,16 +433,11 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
 
   useEffect(() => {
     void refreshSlate(week);
-    void refreshSlow(week);
-  }, [week, refreshSlate, refreshSlow]);
+  }, [week, refreshSlate]);
   useEffect(() => {
     const timer = window.setInterval(() => void refreshSlate(week), AUTO_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [week, refreshSlate]);
-  useEffect(() => {
-    const timer = window.setInterval(() => void refreshSlow(week), RESEARCH_REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, [week, refreshSlow]);
   useEffect(() => {
     if (!selected) return;
     let active = true;
@@ -425,9 +453,7 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const upcomingGames = currentGames.filter((game) => game.gameState === 'scheduled' && new Date(game.scheduledKickoffAt ?? '').getTime() > Date.now());
   const inProgressGames = currentGames.filter((game) => game.gameState === 'in_progress');
   const finalGames = currentGames.filter((game) => game.gameState === 'final');
-  const nextGame = [...upcomingGames].sort((left, right) => (new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER) - (new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER))[0] ?? currentGames[0] ?? null;
   const slateV5Available = currentGames.filter((game) => game.v5Available).length;
-  const canonical = learning?.record;
   const systems = useMemo(() => {
     const v5Reason = currentGames.find((game) => !game.v5Available)?.v5UnavailableReason;
     return [
@@ -442,20 +468,6 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
     ];
   }, [currentGames, dashboard, learning, live, slate, slateError, slateV5Available]);
 
-  const benchmark = (historical?.currentBenchmark as Record<string, unknown> | undefined)?.metrics as Record<string, unknown> | undefined;
-  const benchmarkAccuracy = asNumber(benchmark?.accuracy) ?? 0.6633802816901408;
-  const benchmarkCorrect = asNumber(benchmark?.correct) ?? 942;
-  const benchmarkIncorrect = asNumber(benchmark?.incorrect) ?? 478;
-  const benchmarkBrier = asNumber(benchmark?.brier) ?? 0.21149351343943848;
-  const benchmarkLogLoss = asNumber(benchmark?.logLoss) ?? 0.6102688000087197;
-  const memory = learning?.memory;
-  const replay = (historical?.v4 as Record<string, unknown> | undefined)?.replay as Record<string, unknown> | undefined;
-  const labPostmortems = asNumber(replay?.gamesStudied) ?? asNumber(memory?.postmortems) ?? 1420;
-  const labErrors = asNumber(replay?.errorMemory) ?? asNumber(memory?.errors) ?? 387;
-  const labSuccesses = asNumber(replay?.successMemory) ?? asNumber(memory?.successes) ?? 942;
-  const labPromoted = asNumber(replay?.specialistsPromoted) ?? 0;
-  const promotedSpecialists = (memory?.specialists ?? []).filter((row) => (asNumber(row.production_weight) ?? 0) > 0 && String(row.code) !== 'market_baseline').length;
-  const healthySystems = systems.filter((system) => system.state === 'Healthy').length;
 
   return (
     <main className="min-h-screen bg-[#06111d] text-slate-100 selection:bg-sky-400/30">
@@ -470,86 +482,68 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
           <div className="flex flex-wrap items-center gap-2">
             <label className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-400">Week <select aria-label="Forecast week" value={week} onChange={(event) => setWeek(Number(event.target.value))} className="ml-1 bg-transparent font-bold text-white outline-none">{Array.from({ length: 18 }, (_, index) => <option className="bg-slate-900" key={index + 1} value={index + 1}>{index + 1}</option>)}</select></label>
             <Button variant="outline" size="sm" onClick={() => void refreshSlate(week, true)} className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"><RefreshCw className={`mr-1 size-3.5 ${refreshing ? 'animate-spin' : ''}`} />Refresh</Button>
+            <Button variant="outline" size="sm" onClick={() => { void refreshSlow(week); setResearchOpen(true); }} className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10">Research details <ChevronRight className="ml-1 size-3.5" /></Button>
             <Button variant="outline" size="sm" onClick={onOpenLegacy} className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10">Full analysis desk <ChevronRight className="ml-1 size-3.5" /></Button>
           </div>
         </header>
 
-        <NextGame game={nextGame} retrievedAt={slate?.retrievedAt ?? null} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
-
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="Week games" value={slate ? String(currentGames.length) : '—'} detail={slate ? `${upcomingGames.length} upcoming · ${inProgressGames.length} live · ${finalGames.length} final` : 'Loading schedule'} icon={<CalendarClock className="size-4 text-sky-300" />} />
-          <MetricCard label="Current season record" value={canonical?.total ? `${canonical.correct}–${canonical.incorrect}` : 'No graded games'} detail={canonical?.total ? `${pct(canonical.accuracy)} accuracy · canonical picks` : 'Canonical record only'} icon={<Trophy className="size-4 text-amber-300" />} />
-          <MetricCard label="System health" value={systems.length ? `${healthySystems}/${systems.length}` : '—'} detail={live ? 'Schedule, market, feed and D1 checks' : 'Checking live systems'} icon={<Gauge className="size-4 text-emerald-300" />} />
-          <MetricCard label="Last slate refresh" value={slate ? relative(slate.retrievedAt) : '—'} detail={slate ? `Auto-refresh ≤45 sec · ${slate.capture.captureBucket}` : 'Waiting for server'} icon={<Radio className="size-4 text-emerald-300" />} />
+          <MetricCard label="Lowest confidence" value={currentGames.length ? 'Rank 1' : '—'} detail="Closest to a toss-up" icon={<Gauge className="size-4 text-sky-300" />} />
+          <MetricCard label="Highest confidence" value={currentGames.length ? `Rank ${currentGames.length}` : '—'} detail="Most confident weekly pick" icon={<Trophy className="size-4 text-amber-300" />} />
+          <MetricCard label="Last refresh" value={slate ? relative(slate.retrievedAt) : '—'} detail={slate ? 'Auto-refreshes every 45 seconds' : 'Waiting for the weekly board'} icon={<Radio className="size-4 text-emerald-300" />} />
         </section>
-
-        <section className="mb-6 grid gap-4 xl:grid-cols-[1.35fr_.65fr]">
-          <div className="rounded-2xl border border-emerald-400/20 bg-gradient-to-br from-emerald-400/[.10] to-[#0b1927] p-5 shadow-lg shadow-black/10">
-            <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] font-bold tracking-[0.18em] text-emerald-300 uppercase">CURRENT MODEL BENCHMARK</p><h2 className="mt-1 text-xl font-black text-white">Historical benchmark</h2></div><Pill tone="green">V2 STATUS: PRODUCTION CHAMPION</Pill></div>
-            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-5"><MetricInline label="Accuracy" value={pct(benchmarkAccuracy)} /><MetricInline label="Correct" value={number(benchmarkCorrect, 0)} /><MetricInline label="Incorrect" value={number(benchmarkIncorrect, 0)} /><MetricInline label="Brier" value={number(benchmarkBrier, 3)} /><MetricInline label="Log loss" value={number(benchmarkLogLoss, 3)} /></div>
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-slate-400">2021–2025 decided games · frozen market-anchored benchmark</p><Button size="sm" variant="outline" onClick={() => setBenchmarkOpen(true)} className="border-emerald-300/30 bg-emerald-300/10 text-emerald-100 hover:bg-emerald-300/20">View Historical Lab <ChevronRight className="ml-1 size-3.5" /></Button></div>
-          </div>
-          <div className="rounded-2xl border border-violet-400/20 bg-gradient-to-br from-violet-400/[.10] to-[#0b1927] p-5 shadow-lg shadow-black/10">
-            <div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-bold tracking-[0.18em] text-violet-300 uppercase">V4 SELF-LEARNING LAB</p><h2 className="mt-1 text-xl font-black text-white">Research memory</h2></div><BrainCircuit className="size-5 text-violet-300" /></div>
-            <div className="mt-4 grid grid-cols-2 gap-3"><MetricInline label="Postmortems" value={number(labPostmortems, 0)} /><MetricInline label="Error memories" value={number(labErrors, 0)} /><MetricInline label="Success memories" value={number(labSuccesses, 0)} /><MetricInline label="Specialists promoted" value={number(Math.max(labPromoted, promotedSpecialists), 0)} /></div>
-            <p className="mt-4 text-xs leading-relaxed text-slate-400">The model reviews completed games, records meaningful mistakes and successful patterns, and tests specialists on future games before allowing them to influence predictions.</p>
-            <Button size="sm" variant="outline" onClick={() => setResearchOpen(true)} className="mt-4 border-violet-300/30 bg-violet-300/10 text-violet-100 hover:bg-violet-300/20">View research lab <ChevronRight className="ml-1 size-3.5" /></Button>
-          </div>
-        </section>
-
-        <section className="mb-6 rounded-2xl border border-white/10 bg-[#0b1927]/90 p-4 shadow-lg shadow-black/10"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-[10px] font-bold tracking-[0.18em] text-sky-300 uppercase">SYSTEM & FEED HEALTH</p><p className="mt-1 text-sm text-slate-300">Production decisions stay on V2. Research signals stay separate until they prove themselves prospectively.</p></div><div className="flex flex-wrap gap-2">{systems.map((system) => <Pill key={system.label} tone={system.state === 'Healthy' ? 'green' : system.state === 'Error' ? 'red' : system.state === 'Stale' ? 'amber' : 'neutral'}>{system.label}: {system.state}</Pill>)}</div></div></section>
 
         {slateError && <div className="mb-5"><ErrorBox message={slateError} /></div>}
-        {slowError && <div className="mb-5"><ErrorBox message={`Background research: ${slowError}`} /></div>}
+        {slowError && <div className="mb-5"><ErrorBox message={`Research details: ${slowError}`} /></div>}
 
-        <WinnerPicks games={currentGames} loading={!slate && !slateError} />
         <CurrentSlate week={week} games={currentGames} loading={!slate && !slateError} onSelect={setSelected} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
+        <WinnerPicks games={currentGames} loading={!slate && !slateError} />
+        <MondayNightTotals games={currentGames} loading={!slate && !slateError} />
       </div>
-      <BenchmarkDialog open={benchmarkOpen} onOpenChange={setBenchmarkOpen} historical={historical} research={research} />
       <ResearchLabDialog open={researchOpen} onOpenChange={setResearchOpen} exam={exam} slate={slate} historical={historical} research={research} dashboard={dashboard} live={live} learning={learning} systems={systems} atlasSort={atlasSort} setAtlasSort={setAtlasSort} />
       <GameDetail game={selected} onClose={() => setSelected(null)} detail={detail} detailError={detailError} />
     </main>
   );
 }
 
-function NextGame({ game, retrievedAt, marketHistory, prospectiveHistory }: { game: SlateGame | null; retrievedAt: string | null; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>> }) {
-  if (!game) return null;
-  const market = game.market;
-  const movement = currentMovement(marketHistory.filter((row) => row.game_key === game.gameKey), prospectiveHistory.filter((row) => row.game_key === game.gameKey));
-  return <section className="mb-6 overflow-hidden rounded-2xl border border-sky-300/25 bg-gradient-to-r from-sky-400/[.12] via-[#0b1927] to-violet-400/[.08] p-5 shadow-lg shadow-black/10"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] font-bold tracking-[0.18em] text-sky-200 uppercase">Next game</p><h2 className="mt-1 text-2xl font-black text-white">{game.away} <span className="text-slate-500">at</span> {game.home}</h2><p className="mt-1 text-sm text-slate-300">{time(game.scheduledKickoffAt)} · {gameStatus(game)}</p></div><div className="text-right text-xs text-slate-400"><p>Data updated {relative(retrievedAt)}</p><p className="mt-1">{movement ?? 'No prior captured market change.'}</p></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><div className="rounded-xl border border-emerald-300/25 bg-emerald-400/10 p-3"><Pill tone="green">Official · V2 production</Pill><p className="mt-2 text-lg font-black text-white">{game.v2OfficialPick}</p><p className="text-sm text-emerald-100">Win probability {pct(officialWinnerProbability(game))}</p></div><div className="rounded-xl border border-violet-300/25 bg-violet-400/10 p-3"><Pill tone="blue">Shadow · V5 / V6 research</Pill><p className="mt-2 text-sm font-bold text-white">{game.v5Available ? `${game.v5ShadowPick} · ${pct(game.v5ShadowProbability)}` : 'V5 unavailable'}</p><p className="mt-1 text-xs leading-relaxed text-violet-100">V6 shadow is unavailable until the historical lab is reviewed and connected. It cannot alter the official pick.</p></div><div className="rounded-xl border border-white/10 bg-white/[.04] p-3"><p className="text-[10px] font-bold tracking-[0.14em] text-slate-400 uppercase">Market odds</p><p className="mt-2 font-bold text-white">ML {price(market?.awayMoneyline)} / {price(market?.homeMoneyline)}</p><p className="mt-1 text-sm text-slate-300">Spread {spread(market?.awaySpread)} / {spread(market?.homeSpread)}</p></div><div className="rounded-xl border border-white/10 bg-white/[.04] p-3"><p className="text-[10px] font-bold tracking-[0.14em] text-slate-400 uppercase">Decision status</p><p className="mt-2 font-bold text-white">{game.disagreement ? 'Official and shadow disagree' : 'No shadow disagreement'}</p><p className="mt-1 text-sm text-slate-300">{game.marketSource ?? 'Market source unavailable'}</p></div></div></section>;
-}
-
 function WinnerPicks({ games, loading }: { games: SlateGame[]; loading: boolean }) {
   if (loading) return <LoadingSlate />;
   if (!games.length) return null;
-  return <section className="mb-6"><SectionHeading eyebrow="WINNER PICKS & WHY" title="Official V2 winner picks" detail="Each explanation is limited to the evidence currently used by the official model. Live and final games retain their locked pregame selection." /><div className="grid gap-3 xl:grid-cols-2">{games.map((game) => <article key={`winner-${game.gameKey}`} className="rounded-2xl border border-emerald-400/15 bg-gradient-to-br from-emerald-400/[.06] to-[#0b1927] p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs text-slate-400">{game.away} at {game.home}</p><p className="mt-1 text-lg font-black text-white">{game.v2OfficialPick}</p><p className="mt-1 text-sm text-emerald-100">Official win probability {pct(officialWinnerProbability(game))}</p></div><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill></div><ul className="mt-3 space-y-1.5 text-sm leading-relaxed text-slate-300">{winnerReasons(game).map((reason) => <li key={reason} className="flex gap-2"><span className="mt-1 text-emerald-300">•</span><span>{reason}</span></li>)}</ul></article>)}</div></section>;
+  const ranked = rankWeeklyPicks(games);
+  return <section className="mb-6"><SectionHeading eyebrow="WEEKLY WINNER RANKINGS" title="Every official winner pick, ranked 1 through the full slate" detail={`Rank 1 is the closest to a toss-up. Rank ${ranked.length} is the most confident pick this week — not a guarantee.`} /><div className="grid gap-3 xl:grid-cols-2">{ranked.map(({ game, rank, winnerProbability }) => <article key={`winner-${game.gameKey}`} className="rounded-2xl border border-emerald-400/15 bg-gradient-to-br from-emerald-400/[.06] to-[#0b1927] p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="flex items-start gap-3"><div className={`grid size-12 shrink-0 place-items-center rounded-xl border text-lg font-black ${rank === ranked.length ? 'border-amber-300/40 bg-amber-300/15 text-amber-100' : 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'}`}>{rank}</div><div><p className="text-xs text-slate-400">{game.away} at {game.home}</p><p className="mt-1 text-lg font-black text-white">{game.v2OfficialPick}</p><p className="mt-1 text-sm text-emerald-100">{pct(winnerProbability)} chance to win</p></div></div><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill></div><div className="mt-3 border-t border-white/8 pt-3 text-xs leading-5 text-slate-300"><p><span className="font-bold text-slate-100">Confidence rank {rank}/{ranked.length}.</span> {rank === 1 ? 'Closest matchup on the board.' : rank === ranked.length ? 'Highest model confidence on this week’s board.' : 'Ranked by the official V2 win probability.'}</p><p className="mt-1 text-slate-400">{winnerReasons(game)[0]}</p></div></article>)}</div></section>;
+}
+
+function MondayNightTotals({ games, loading }: { games: SlateGame[]; loading: boolean }) {
+  if (loading) return null;
+  const mondayNightGames = games.filter(isMondayNightFootball);
+  return <section className="mb-6"><SectionHeading eyebrow="MONDAY NIGHT FOOTBALL" title="Projected combined points" detail="The official V2 model picks winners. Monday-night total projections use the current published market total when available; no unvalidated score formula is substituted." />{!mondayNightGames.length ? <div className="rounded-2xl border border-white/10 bg-[#0b1927] p-4 text-sm text-slate-400">No Monday night game is listed in this week’s returned schedule.</div> : <div className="grid gap-3 xl:grid-cols-2">{mondayNightGames.map((game) => { const total = game.market?.totalLine ?? null; return <article key={`mnf-${game.gameKey}`} className="rounded-2xl border border-sky-300/20 bg-gradient-to-br from-sky-400/[.08] to-[#0b1927] p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold tracking-[0.14em] text-sky-300 uppercase">Monday night matchup</p><h3 className="mt-1 text-xl font-black text-white">{game.away} <span className="text-slate-500">at</span> {game.home}</h3><p className="mt-1 text-sm text-slate-400">{time(game.scheduledKickoffAt)}</p></div><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill></div><div className="mt-4 rounded-xl border border-sky-300/20 bg-sky-300/[.08] p-4"><p className="text-[10px] font-bold tracking-[0.14em] text-sky-200 uppercase">Projected total points</p><p className="mt-1 text-3xl font-black text-white">{total === null ? 'Unavailable' : total.toFixed(1)}</p><p className="mt-1 text-xs text-slate-300">{total === null ? 'No current market total is available yet.' : `Current market consensus total · ${game.marketSource ?? 'source unavailable'}`}</p></div></article>; })}</div>}</section>;
 }
 
 function CurrentSlate({ week, games, loading, onSelect, marketHistory, prospectiveHistory }: { week: number; games: SlateGame[]; loading: boolean; onSelect: (game: SlateGame) => void; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>> }) {
   if (loading) return <LoadingSlate />;
   if (!games.length) return <div className="rounded-2xl border border-white/10 bg-[#0b1927] p-8 text-center text-slate-400"><CloudOff className="mx-auto mb-3 size-8" />No current schedule games were returned by the NFL schedule source for this week.</div>;
-  return <section><SectionHeading eyebrow="FULL WEEK SCHEDULE" title={`All Week ${week} games and official V2 selections`} detail="Every scheduled game stays published here, including games in progress and final games. Click a game for its captured history and full forecast detail." />
-    <div className="grid gap-4 2xl:grid-cols-2">{games.map((game) => <GameCard game={game} key={game.gameKey} onClick={() => onSelect(game)} marketHistory={marketHistory} prospectiveHistory={prospectiveHistory} />)}</div>
+  const ranks = rankWeeklyPicks(games);
+  const rankByGame = new Map(ranks.map((item) => [item.game.gameKey, item.rank]));
+  return <section><SectionHeading eyebrow="FULL WEEK SCHEDULE" title={`All Week ${week} games: away, home, winner, and win chance`} detail="Every game stays published, including games in progress and final games. The listed winner is the locked official V2 pregame selection." />
+    <div className="grid gap-4 2xl:grid-cols-2">{games.map((game) => <GameCard game={game} key={game.gameKey} onClick={() => onSelect(game)} marketHistory={marketHistory} prospectiveHistory={prospectiveHistory} rank={rankByGame.get(game.gameKey) ?? 1} totalRanks={ranks.length} />)}</div>
   </section>;
 }
 
-function GameCard({ game, onClick, marketHistory, prospectiveHistory }: { game: SlateGame; onClick: () => void; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>> }) {
-  const market = game.market;
+function GameCard({ game, onClick, marketHistory, prospectiveHistory, rank, totalRanks }: { game: SlateGame; onClick: () => void; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>>; rank: number; totalRanks: number }) {
   const v2Away = 1 - game.v2OfficialProbability;
   const marketRows = marketHistory.filter((row) => row.game_key === game.gameKey);
   const modelRows = prospectiveHistory.filter((row) => row.game_key === game.gameKey);
   const movement = currentMovement(marketRows, modelRows);
+  const winnerProbability = officialWinnerProbability(game);
   return <button type="button" onClick={onClick} className="group w-full rounded-2xl border border-white/10 bg-gradient-to-br from-[#0d2133] to-[#081725] p-4 text-left shadow-lg shadow-black/10 transition hover:border-sky-300/35 hover:from-[#10283d] focus:outline-none focus:ring-2 focus:ring-sky-300/50">
-    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill><Pill tone="green">V2 OFFICIAL</Pill>{game.gameState !== 'scheduled' && <Pill tone="neutral">PREGAME PICK LOCKED</Pill>}{game.disagreement && <Pill tone="red">DISAGREEMENT</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
+    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill><Pill tone="green">V2 OFFICIAL</Pill>{game.gameState !== 'scheduled' && <Pill tone="neutral">PREGAME PICK LOCKED</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
     <div className="mt-4 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-3"><div><p className="truncate text-lg font-black text-white">{game.away}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Away · {pct(v2Away)}</p></div><span className="pb-1 text-xs font-bold text-slate-600">at</span><div className="text-right"><p className="truncate text-lg font-black text-white">{game.home}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Home · {pct(game.v2OfficialProbability)}</p></div></div>
-    <div className="mt-4 grid grid-cols-2 gap-2 border-y border-white/8 py-3 text-xs sm:grid-cols-4"><DataCell label="V2 pick" value={game.v2OfficialPick} /><DataCell label="Market home" value={pct(game.marketHomeProbability)} /><DataCell label="Spread" value={market ? `${spread(market.awaySpread)} / ${spread(market.homeSpread)}` : 'Unavailable'} /><DataCell label="Moneyline" value={`${price(market?.awayMoneyline)} / ${price(market?.homeMoneyline)}`} /></div>
-    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs"><div className="flex items-center gap-2"><Pill tone={game.v5Available ? 'blue' : 'neutral'}>Shadow · V5</Pill><span className="text-slate-400">{game.v5Available ? `${game.v5ShadowPick} · ${pct(game.v5ShadowProbability)}` : 'Unavailable until prior-week features exist'} · V6 lab pending review</span></div>{movement && <span className="flex items-center gap-1 text-sky-200"><Activity className="size-3.5" />{movement.replace('Observed change: ', '')}</span>}</div>
+    <div className="mt-4 grid gap-3 border-y border-white/8 py-3 sm:grid-cols-[minmax(0,1fr)_auto]"><div><p className="text-[10px] font-bold tracking-[0.14em] text-emerald-300 uppercase">Official winner</p><p className="mt-1 text-xl font-black text-white">{game.v2OfficialPick}</p><p className="mt-1 text-sm font-semibold text-emerald-100">{pct(winnerProbability)} chance to win</p></div><div className={`rounded-xl border px-3 py-2 text-right ${rank === totalRanks ? 'border-amber-300/35 bg-amber-300/10 text-amber-100' : 'border-sky-300/25 bg-sky-300/10 text-sky-100'}`}><p className="text-[10px] font-bold tracking-[0.12em] uppercase">Confidence</p><p className="mt-1 text-lg font-black">{rank} / {totalRanks}</p><p className="text-[11px]">{rank === 1 ? 'Lowest' : rank === totalRanks ? 'Highest' : 'Ranked'}</p></div></div>
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-slate-400">Click for the locked pregame record and market detail.</span>{movement && <span className="flex items-center gap-1 text-sky-200"><Activity className="size-3.5" />{movement.replace('Observed change: ', '')}</span>}</div>
   </button>;
 }
 
-function TeamProbability({ team, probability, pick, side }: { team: string; probability: number; pick: boolean; side: string }) {
-  return <div><p className="truncate text-base font-bold text-white">{team} {pick && <span className="ml-1 text-[10px] tracking-widest text-emerald-300">PICK</span>}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500">{side}</p><div className="mt-2 h-2 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full ${pick ? 'bg-emerald-400' : 'bg-sky-400/70'}`} style={{ width: `${Math.max(2, probability * 100)}%` }} /></div><p className="mt-1.5 text-lg font-black text-white">{pct(probability)}</p></div>;
-}
 function currentMovement(marketRows: Array<Record<string, unknown>>, modelRows: Array<Record<string, unknown>>) {
   const parts: string[] = [];
   if (marketRows.length >= 2) {
@@ -575,12 +569,7 @@ function currentMovement(marketRows: Array<Record<string, unknown>>, modelRows: 
   return parts.length ? `Observed change: ${parts.join(' · ')}. No cause is inferred.` : null;
 }
 function DataCell({ label, value }: { label: string; value: string }) { return <div><p className="text-[10px] tracking-[0.11em] text-slate-500 uppercase">{label}</p><p className="mt-1 truncate font-semibold text-slate-200">{value}</p></div>; }
-function MetricInline({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-white/8 bg-black/10 px-3 py-2"><p className="text-[10px] font-semibold tracking-[0.11em] text-slate-500 uppercase">{label}</p><p className="mt-1 text-lg font-black text-white">{value}</p></div>; }
 function SectionHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail?: string }) { return <div className="mb-4"><p className="text-[10px] font-bold tracking-[0.18em] text-sky-300 uppercase">{eyebrow}</p><h2 className="mt-1 text-2xl font-black tracking-tight text-white">{title}</h2>{detail && <p className="mt-1 text-sm text-slate-400">{detail}</p>}</div>; }
-
-function BenchmarkDialog({ open, onOpenChange, historical, research }: { open: boolean; onOpenChange: (open: boolean) => void; historical: Record<string, unknown> | null; research: Record<string, unknown> | null }) {
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] max-w-[calc(100%-1rem)] overflow-y-auto border border-white/15 bg-[#091725] text-slate-100 sm:max-w-6xl"><DialogHeader><DialogTitle className="text-2xl font-black text-white">Full historical analysis</DialogTitle><DialogDescription className="text-slate-400">Detailed benchmark methodology, calibration, yearly results, caveats, and research comparisons.</DialogDescription></DialogHeader><div className="mt-4"><HistoryPanel historical={historical} research={research} /></div></DialogContent></Dialog>;
-}
 
 function ResearchLabDialog({ open, onOpenChange, exam, slate, historical, research, dashboard, live, learning, systems, atlasSort, setAtlasSort }: { open: boolean; onOpenChange: (open: boolean) => void; exam: Record<string, unknown> | null; slate: Slate | null; historical: Record<string, unknown> | null; research: Record<string, unknown> | null; dashboard: DashboardData | null; live: Record<string, unknown> | null; learning: Learning | null; systems: Array<{ label: string; state: string; detail: string }>; atlasSort: 'positive' | 'negative' | 'sample' | 'z'; setAtlasSort: (sort: 'positive' | 'negative' | 'sample' | 'z') => void }) {
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] max-w-[calc(100%-1rem)] overflow-y-auto border border-white/15 bg-[#091725] p-0 text-slate-100 sm:max-w-7xl"><div className="p-5 sm:p-6"><DialogHeader><DialogTitle className="text-2xl font-black text-white">Research / Model Lab</DialogTitle><DialogDescription className="text-slate-400">Historical replay, V5 shadow evidence, failure analysis, football-state research, and learning memory. Nothing here changes production picks.</DialogDescription></DialogHeader><Tabs defaultValue="exam" className="mt-5 gap-5"><div className="overflow-x-auto border-y border-white/10 bg-[#081522] py-2"><TabsList variant="line" className="h-auto min-w-max gap-1 p-0"><TabsTrigger value="exam" className="px-3 py-2 text-xs">V2 vs V5</TabsTrigger><TabsTrigger value="history" className="px-3 py-2 text-xs">Historical</TabsTrigger><TabsTrigger value="atlas" className="px-3 py-2 text-xs">Failure atlas</TabsTrigger><TabsTrigger value="research" className="px-3 py-2 text-xs">Football state</TabsTrigger><TabsTrigger value="learning" className="px-3 py-2 text-xs">Self-learning</TabsTrigger></TabsList></div><TabsContent value="exam"><ExamPanel exam={exam} slate={slate} /></TabsContent><TabsContent value="history"><HistoryPanel historical={historical} research={research} /></TabsContent><TabsContent value="atlas"><FailureAtlas research={research} sort={atlasSort} setSort={setAtlasSort} /></TabsContent><TabsContent value="research"><ResearchPanel dashboard={dashboard} live={live} /></TabsContent><TabsContent value="learning"><LearningPanel learning={learning} dashboard={dashboard} systems={systems} /></TabsContent></Tabs></div></DialogContent></Dialog>;
