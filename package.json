@@ -6,7 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "prebuild": "pnpm run historical:refresh && pnpm run historical:check && pnpm run model:check",
+    "prebuild": "node scripts/build-historical-backtest.mjs && node scripts/verify-historical-benchmark.mjs && node scripts/verify-model-integrity.mjs",
     "dev": "vinext dev",
     "build": "vinext build",
     "historical:refresh": "node scripts/build-historical-backtest.mjs",
