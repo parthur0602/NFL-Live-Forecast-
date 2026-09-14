@@ -34,6 +34,25 @@ import { V5_PROSPECTIVE_ARTIFACT } from '@/lib/v5-prospective-artifact';
 const SEASON = 2026;
 const SCHEDULE_SOURCE =
   'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?limit=1000&dates=20260901-20270215';
+const SCHEDULE_FALLBACK_SOURCE =
+  'https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv';
+
+// nflverse uses stable team abbreviations in its released schedule file. This
+// map is only a schedule-reader fallback; it has no effect on V2 ratings,
+// probabilities, or the production model's market-first policy.
+const NFLVERSE_TEAM_NAMES: Record<string, string> = {
+  ARI: 'Arizona Cardinals', ATL: 'Atlanta Falcons', BAL: 'Baltimore Ravens',
+  BUF: 'Buffalo Bills', CAR: 'Carolina Panthers', CHI: 'Chicago Bears',
+  CIN: 'Cincinnati Bengals', CLE: 'Cleveland Browns', DAL: 'Dallas Cowboys',
+  DEN: 'Denver Broncos', DET: 'Detroit Lions', GB: 'Green Bay Packers',
+  HOU: 'Houston Texans', IND: 'Indianapolis Colts', JAX: 'Jacksonville Jaguars',
+  KC: 'Kansas City Chiefs', LV: 'Las Vegas Raiders', LAC: 'Los Angeles Chargers',
+  LA: 'Los Angeles Rams', MIA: 'Miami Dolphins', MIN: 'Minnesota Vikings',
+  NE: 'New England Patriots', NO: 'New Orleans Saints', NYG: 'New York Giants',
+  NYJ: 'New York Jets', PHI: 'Philadelphia Eagles', PIT: 'Pittsburgh Steelers',
+  SEA: 'Seattle Seahawks', SF: 'San Francisco 49ers', TB: 'Tampa Bay Buccaneers',
+  TEN: 'Tennessee Titans', WAS: 'Washington Commanders',
+};
 
 type ScheduleEvent = {
   id?: string;
@@ -65,6 +84,116 @@ type CurrentGame = {
   statusDetail: string | null;
 };
 
+type ScheduleFetchResult = {
+  games: CurrentGame[];
+  source: string;
+  warning: string | null;
+};
+
+type CanonicalSnapshot = {
+  game_key: string;
+  predicted_winner: string;
+  home_probability: number;
+  market_home_probability: number | null;
+  model_version: string;
+};
+
+function sortGames(games: CurrentGame[]) {
+  return [...new Map(games.map((game) => [game.gameKey, game])).values()]
+    .sort((left, right) => {
+      const leftTime = new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
+      const rightTime = new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
+      return leftTime - rightTime || left.gameKey.localeCompare(right.gameKey);
+    });
+}
+
+function parseCsv(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (character === '"') {
+      if (quoted && text[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === ',' && !quoted) {
+      row.push(cell);
+      cell = '';
+    } else if (character === '\n' && !quoted) {
+      row.push(cell.replace(/\r$/, ''));
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else {
+      cell += character;
+    }
+  }
+  if (cell || row.length) {
+    row.push(cell.replace(/\r$/, ''));
+    rows.push(row);
+  }
+  const [header, ...records] = rows;
+  if (!header) return [] as Array<Record<string, string>>;
+  return records.map((record) =>
+    Object.fromEntries(header.map((name, index) => [name, record[index] ?? ''])),
+  );
+}
+
+function fallbackKickoff(gameday: string, gametime: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(gameday) || !/^\d{1,2}:\d{2}$/.test(gametime))
+    return null;
+  // The public schedule supplies local eastern kickoff times. NFL regular-season
+  // dates use EDT from March through October and EST otherwise.
+  const month = Number(gameday.slice(5, 7));
+  const offset = month >= 3 && month <= 10 ? '-04:00' : '-05:00';
+  const timestamp = new Date(`${gameday}T${gametime}:00${offset}`);
+  return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : null;
+}
+
+async function nflverseScheduleForWeek(week: number): Promise<CurrentGame[]> {
+  const response = await fetch(SCHEDULE_FALLBACK_SOURCE, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Schedule fallback returned ${response.status}.`);
+  const now = Date.now();
+  const games = parseCsv(await response.text()).flatMap((record) => {
+    if (
+      Number(record.season) !== SEASON ||
+      record.game_type !== 'REG' ||
+      Number(record.week) !== week
+    ) return [];
+    const awayTeam = NFLVERSE_TEAM_NAMES[record.away_team];
+    const homeTeam = NFLVERSE_TEAM_NAMES[record.home_team];
+    if (!awayTeam || !homeTeam) return [];
+    const scheduledKickoffAt = fallbackKickoff(record.gameday, record.gametime);
+    const awayScore = Number(record.away_score);
+    const homeScore = Number(record.home_score);
+    const hasFinalScore =
+      record.away_score.trim() !== '' &&
+      record.home_score.trim() !== '' &&
+      Number.isFinite(awayScore) &&
+      Number.isFinite(homeScore);
+    const kickoffPassed = scheduledKickoffAt !== null && Date.parse(scheduledKickoffAt) <= now;
+    return [{
+      week,
+      gameKey: `${awayTeam}__${homeTeam}`,
+      awayTeam,
+      homeTeam,
+      scheduledKickoffAt,
+      gameState: hasFinalScore ? 'final' : kickoffPassed ? 'in_progress' : 'scheduled',
+      statusDetail: hasFinalScore
+        ? 'Final'
+        : kickoffPassed
+          ? 'Kickoff passed — live status unavailable'
+          : 'Scheduled',
+    } satisfies CurrentGame];
+  });
+  return sortGames(games);
+}
+
 function isPreKickoffCaptureEligible(game: CurrentGame, capturedAt: string) {
   // A provider's event status is authoritative for this safety check. The
   // timestamp is a second, independent guard for a stale `scheduled` status.
@@ -89,33 +218,54 @@ function database() {
   return binding;
 }
 
-async function scheduleForWeek(week: number): Promise<CurrentGame[]> {
-  const response = await fetch(SCHEDULE_SOURCE, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`Schedule source returned ${response.status}.`);
-  const body = (await response.json()) as { events?: ScheduleEvent[] };
-  const games = (body.events ?? []).flatMap((event) => {
-    if (event.season?.year !== SEASON || event.season?.type !== 2 || event.week?.number !== week)
-      return [];
-    const competition = event.competitions?.[0];
-    const home = competition?.competitors?.find((team) => team.homeAway === 'home')?.team?.displayName;
-    const away = competition?.competitors?.find((team) => team.homeAway === 'away')?.team?.displayName;
-    if (!home || !away) return [];
-    return [{
-      week,
-      gameKey: `${away}__${home}`,
-      awayTeam: away,
-      homeTeam: home,
-      scheduledKickoffAt: competition?.date ?? event.date ?? null,
-      gameState: scheduleGameState(event),
-      statusDetail: event.status?.type?.shortDetail ?? null,
-    }];
-  });
-  return [...new Map(games.map((game) => [game.gameKey, game])).values()]
-    .sort((left, right) => {
-      const leftTime = new Date(left.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
-      const rightTime = new Date(right.scheduledKickoffAt ?? '').getTime() || Number.MAX_SAFE_INTEGER;
-      return leftTime - rightTime || left.gameKey.localeCompare(right.gameKey);
+async function scheduleForWeek(week: number): Promise<ScheduleFetchResult> {
+  let primaryFailure: string | null = null;
+  try {
+    const response = await fetch(SCHEDULE_SOURCE, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Schedule source returned ${response.status}.`);
+    const body = (await response.json()) as { events?: ScheduleEvent[] };
+    const games = (body.events ?? []).flatMap((event) => {
+      if (event.season?.year !== SEASON || event.season?.type !== 2 || event.week?.number !== week)
+        return [];
+      const competition = event.competitions?.[0];
+      const home = competition?.competitors?.find((team) => team.homeAway === 'home')?.team?.displayName;
+      const away = competition?.competitors?.find((team) => team.homeAway === 'away')?.team?.displayName;
+      if (!home || !away) return [];
+      return [{
+        week,
+        gameKey: `${away}__${home}`,
+        awayTeam: away,
+        homeTeam: home,
+        scheduledKickoffAt: competition?.date ?? event.date ?? null,
+        gameState: scheduleGameState(event),
+        statusDetail: event.status?.type?.shortDetail ?? null,
+      }];
     });
+    if (games.length) return { games: sortGames(games), source: 'ESPN scoreboard', warning: null };
+    primaryFailure = `The live schedule source returned no Week ${week} games.`;
+  } catch (error) {
+    primaryFailure = error instanceof Error ? error.message : 'The live schedule source could not be read.';
+  }
+
+  const fallbackGames = await nflverseScheduleForWeek(week);
+  if (!fallbackGames.length)
+    throw new Error(`${primaryFailure ?? 'Live schedule unavailable.'} The published schedule fallback also returned no Week ${week} games.`);
+  return {
+    games: fallbackGames,
+    source: 'nflverse published schedule fallback',
+    warning: primaryFailure,
+  };
+}
+
+async function marketLinesForSlate() {
+  try {
+    return { lines: await fetchMarketLines(), warning: null };
+  } catch (error) {
+    return {
+      lines: [],
+      warning: error instanceof Error ? error.message : 'The market source could not be read.',
+    };
+  }
 }
 
 export async function GET(request: Request) {
@@ -131,14 +281,34 @@ export async function GET(request: Request) {
 
     // This endpoint accepts no probabilities from the browser. It obtains its
     // own schedule, market observation, V2 result, and frozen V5 calculation.
-    const [games, lines, learned, v5Efficiency] = await Promise.all([
+    const [schedule, marketResult, learned, v5Efficiency] = await Promise.all([
       scheduleForWeek(week),
-      fetchMarketLines(),
+      marketLinesForSlate(),
       safeModelState(),
       loadCurrentV5Efficiency(week),
     ]);
+    let canonicalRows: CanonicalSnapshot[] = [];
+    try {
+      canonicalRows = (
+        await db
+          .prepare(
+            `SELECT game_key, predicted_winner, home_probability, market_home_probability, model_version FROM prediction_snapshots WHERE season = ? AND week = ?`,
+          )
+          .bind(SEASON, week)
+          .all<CanonicalSnapshot>()
+      ).results;
+    } catch {
+      // The weekly display remains usable during a local/schema recovery. In a
+      // normal deployed D1 this lookup preserves the immutable official pick.
+      canonicalRows = [];
+    }
+    const games = schedule.games;
+    const lines = marketResult.lines;
     const capturedAt = new Date().toISOString();
     const byGame = new Map(lines.map((line) => [line.gameKey, line]));
+    const canonicalByGame = new Map(
+      canonicalRows.map((snapshot) => [snapshot.game_key, snapshot]),
+    );
     const footballProbabilityByGame = new Map<string, number>();
     const preKickoffGames = games.filter((game) =>
       isPreKickoffCaptureEligible(game, capturedAt),
@@ -149,10 +319,15 @@ export async function GET(request: Request) {
         ? [{ ...line, source: MARKET_SOURCE_LABEL, observedAt: capturedAt }]
         : [];
     });
-    await saveMarketSnapshots(marketForSlate);
+    // A market feed outage must not hide the official weekly schedule and V2
+    // picks. When no paired line is available, V2 retains its documented
+    // football fallback and the response explicitly marks market data absent.
     const pairs: ProspectiveCaptureInput[] = games.map((game) => {
       const market = byGame.get(game.gameKey) ?? null;
-      const marketHomeProbability = market?.homeImpliedProbability ?? null;
+      const canonical = canonicalByGame.get(game.gameKey);
+      const marketHomeProbability = canonical
+        ? canonical.market_home_probability
+        : market?.homeImpliedProbability ?? null;
       const footballHomeProbability = learnedProbability(
         game.homeTeam,
         game.awayTeam,
@@ -161,7 +336,11 @@ export async function GET(request: Request) {
         learned,
       );
       footballProbabilityByGame.set(game.gameKey, footballHomeProbability);
-      const v2 = v2HomeProbability(footballHomeProbability, marketHomeProbability);
+      const calculatedV2 = v2HomeProbability(footballHomeProbability, marketHomeProbability);
+      // Once a game has its canonical pre-kickoff record, its official V2
+      // probability and pick are immutable. A later refresh may add research
+      // rows but cannot rewrite what the dashboard calls the official pick.
+      const v2 = canonical?.home_probability ?? calculatedV2;
       const v5 = calculateV5Shadow({
         week,
         homeTeam: game.homeTeam,
@@ -174,11 +353,18 @@ export async function GET(request: Request) {
         season: SEASON,
         ...game,
         marketObservedAt: market ? capturedAt : null,
-        marketSource: market ? MARKET_SOURCE_LABEL : null,
+        marketSource: canonical
+          ? canonical.market_home_probability === null
+            ? null
+            : 'Canonical pre-kickoff market snapshot'
+          : market
+            ? MARKET_SOURCE_LABEL
+            : null,
         marketHomeProbability,
         v2HomeProbability: v2,
-        v2PredictedWinner: v2 >= 0.5 ? game.homeTeam : game.awayTeam,
-        v2ModelVersion: MODEL_V2.version,
+        v2PredictedWinner:
+          canonical?.predicted_winner ?? (v2 >= 0.5 ? game.homeTeam : game.awayTeam),
+        v2ModelVersion: canonical?.model_version ?? MODEL_V2.version,
         v5HomeProbability: v5.homeProbability,
         v5PredictedWinner:
           v5.predictedWinner === null
@@ -203,55 +389,76 @@ export async function GET(request: Request) {
     // Keep displaying the full slate, but only preserve a market or paired
     // forecast row while the game is independently confirmed as pre-kickoff.
     // This prevents postgame odds/source responses from entering either ledger.
-    const canonicalCapture = await captureVerifiedPredictions(
-      preKickoffGames.flatMap((game) => {
-        const pair = pairs.find((candidate) => candidate.gameKey === game.gameKey);
-        if (!pair) return [];
-        const market = byGame.get(game.gameKey);
-        const marketExpectedHomeMargin =
-          market?.homeSpread === null || market?.homeSpread === undefined
-            ? null
-            : -market.homeSpread;
-        const expectedHomeMargin =
-          marketExpectedHomeMargin === null
-            ? null
-            : v2ExpectedHomeMargin(0, -marketExpectedHomeMargin);
-        const cover =
-          expectedHomeMargin === null
-            ? null
-            : spreadProbabilities(expectedHomeMargin, market?.homeSpread ?? null);
-        return [{
-          week: game.week,
-          gameKey: game.gameKey,
-          away: game.awayTeam,
-          home: game.homeTeam,
-          predictedWinner: pair.v2PredictedWinner,
-          homeProbability: pair.v2HomeProbability,
-          marketHomeProbability: pair.marketHomeProbability,
-          footballHomeProbability: footballProbabilityByGame.get(game.gameKey) ?? null,
-          expectedHomeMargin,
-          marketExpectedHomeMargin,
-          homeSpread: market?.homeSpread ?? null,
-          homeCoverProbability: cover?.homeCover ?? null,
-          modelVersion: pair.v2ModelVersion,
-          favoriteProbability: Math.max(pair.v2HomeProbability, 1 - pair.v2HomeProbability),
-          liveDelta: 0,
-        }];
-      }),
-      capturedAt,
-    );
-    const capture = await captureProspectiveRows(
-      db,
-      pairs.filter((pair, index) =>
-        isPreKickoffCaptureEligible(games[index]!, capturedAt),
-      ),
-      capturedAt,
-    );
+    let canonicalCapture = { canonicalInserted: 0, ledgerInserted: 0, canonicalTotal: 0 };
+    let capture = {
+      attempted: 0,
+      accepted: 0,
+      skippedAfterKickoff: 0,
+      inserted: 0,
+      duplicateOrExisting: 0,
+      captureBucket: '',
+    };
+    let captureWarning: string | null = null;
+    try {
+      if (marketForSlate.length) await saveMarketSnapshots(marketForSlate);
+      canonicalCapture = await captureVerifiedPredictions(
+        preKickoffGames.flatMap((game) => {
+          const pair = pairs.find((candidate) => candidate.gameKey === game.gameKey);
+          if (!pair) return [];
+          const market = byGame.get(game.gameKey);
+          const marketExpectedHomeMargin =
+            market?.homeSpread === null || market?.homeSpread === undefined
+              ? null
+              : -market.homeSpread;
+          const expectedHomeMargin =
+            marketExpectedHomeMargin === null
+              ? null
+              : v2ExpectedHomeMargin(0, -marketExpectedHomeMargin);
+          const cover =
+            expectedHomeMargin === null
+              ? null
+              : spreadProbabilities(expectedHomeMargin, market?.homeSpread ?? null);
+          return [{
+            week: game.week,
+            gameKey: game.gameKey,
+            away: game.awayTeam,
+            home: game.homeTeam,
+            predictedWinner: pair.v2PredictedWinner,
+            homeProbability: pair.v2HomeProbability,
+            marketHomeProbability: pair.marketHomeProbability,
+            footballHomeProbability: footballProbabilityByGame.get(game.gameKey) ?? null,
+            expectedHomeMargin,
+            marketExpectedHomeMargin,
+            homeSpread: market?.homeSpread ?? null,
+            homeCoverProbability: cover?.homeCover ?? null,
+            modelVersion: pair.v2ModelVersion,
+            favoriteProbability: Math.max(pair.v2HomeProbability, 1 - pair.v2HomeProbability),
+            liveDelta: 0,
+          }];
+        }),
+        capturedAt,
+      );
+      capture = await captureProspectiveRows(
+        db,
+        pairs.filter((pair, index) =>
+          isPreKickoffCaptureEligible(games[index]!, capturedAt),
+        ),
+        capturedAt,
+      );
+    } catch (error) {
+      captureWarning = error instanceof Error
+        ? error.message
+        : 'The pre-kickoff ledger could not be refreshed.';
+    }
     return NextResponse.json(
       {
         season: SEASON,
         week,
         retrievedAt: capturedAt,
+        scheduleSource: schedule.source,
+        scheduleWarning: schedule.warning,
+        marketWarning: marketResult.warning,
+        captureWarning,
         label: PROSPECTIVE_SHADOW_LABEL,
         v5Artifact: {
           version: V5_PROSPECTIVE_ARTIFACT.version,

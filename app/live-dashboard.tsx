@@ -92,6 +92,10 @@ type Slate = {
   week: number;
   retrievedAt: string;
   label: string;
+  scheduleSource?: string;
+  scheduleWarning?: string | null;
+  marketWarning?: string | null;
+  captureWarning?: string | null;
   capture: {
     attempted: number;
     accepted: number;
@@ -320,7 +324,8 @@ async function getJson<T>(path: string): Promise<T> {
   try {
     const response = await fetch(path, { cache: 'no-store', signal: controller.signal });
     const body = (await response.json()) as ApiEnvelope<T>;
-    if (!response.ok) throw new Error(body.error ?? 'Refresh failed.');
+    if (!response.ok)
+      throw new Error(body.detail ? `${body.error ?? 'Refresh failed.'} ${body.detail}` : body.error ?? 'Refresh failed.');
     return body;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') throw new Error('The live data source took too long to respond. Press Refresh to try again.');
@@ -457,12 +462,12 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const systems = useMemo(() => {
     const v5Reason = currentGames.find((game) => !game.v5Available)?.v5UnavailableReason;
     return [
-      { label: 'NFL schedule', state: slateError ? 'Error' : currentGames.length ? 'Healthy' : 'Unavailable', detail: slate?.retrievedAt ?? slateError ?? 'Awaiting schedule refresh' },
-      { label: 'Market source', state: currentGames.some((game) => game.market) ? 'Healthy' : 'Unavailable', detail: currentGames.find((game) => game.market)?.marketSource ?? 'No usable current market line' },
+      { label: 'NFL schedule', state: slateError ? 'Error' : currentGames.length ? 'Healthy' : 'Unavailable', detail: slate ? `${slate.scheduleSource ?? 'schedule source'} · ${relative(slate.retrievedAt)}` : slateError ?? 'Awaiting schedule refresh' },
+      { label: 'Market source', state: currentGames.some((game) => game.market) ? 'Healthy' : 'Unavailable', detail: currentGames.find((game) => game.market)?.marketSource ?? slate?.marketWarning ?? 'No usable current market line' },
       { label: '2026 team efficiency', state: slateV5Available ? 'Healthy' : 'Unavailable', detail: slateV5Available ? 'Prior-week data available' : v5Reason ?? 'No prior-week team data' },
       { label: 'News feed', state: live ? 'Healthy' : 'Unavailable', detail: asText(live?.feedStatus) ?? 'Not refreshed' },
       { label: 'D1 database', state: dashboard?.error ? 'Error' : dashboard ? 'Healthy' : 'Unavailable', detail: dashboard?.databaseCheckedAt ?? dashboard?.detail ?? 'Not refreshed' },
-      { label: 'Prospective exam', state: slate?.capture ? 'Healthy' : 'Unavailable', detail: slate?.capture ? `${slate.capture.inserted} inserted; ${slate.capture.duplicateOrExisting} hourly deduplicated` : 'Not refreshed' },
+      { label: 'Prospective exam', state: slate?.captureWarning ? 'Unavailable' : slate?.capture ? 'Healthy' : 'Unavailable', detail: slate?.captureWarning ?? (slate?.capture ? `${slate.capture.inserted} inserted; ${slate.capture.duplicateOrExisting} hourly deduplicated` : 'Not refreshed') },
       { label: 'V5 artifact', state: slate?.v5Artifact.productionInfluence === 0 ? 'Healthy' : 'Error', detail: slate?.v5Artifact ? `${slate.v5Artifact.version}; shadow influence 0` : 'Not refreshed' },
       { label: 'Learning settlement', state: learning?.error ? 'Error' : learning ? 'Healthy' : 'Unavailable', detail: learning?.note ?? learning?.detail ?? 'Not refreshed' },
     ];
