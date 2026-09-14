@@ -64,6 +64,12 @@ assert(
     !prospectiveRoute.includes('request.json'),
   'Prospective capture must be server-computed rather than browser-submitted.',
 );
+assert(
+  prospectiveRoute.includes("game.gameState !== 'scheduled'") &&
+    prospectiveRoute.includes('captured < kickoff') &&
+    prospectiveRoute.includes('preKickoffGames.flatMap'),
+  'Live capture must reject in-progress/final games and invalid kickoff timestamps.',
+);
 
 const start = historicalSource.indexOf('HISTORICAL_BACKTEST = ');
 const end = historicalSource.lastIndexOf(' as const;');

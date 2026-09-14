@@ -13,6 +13,7 @@
     "historical:check": "node scripts/verify-historical-benchmark.mjs",
     "model:check": "node scripts/verify-model-integrity.mjs",
     "failure:atlas": "node scripts/build-failure-atlas.mjs",
+    "upset:audit": "node scripts/audit-favorite-fragility.mjs",
     "shadow:residual": "node scripts/build-shadow-residual-backtest.mjs",
     "residual:robustness": "node scripts/build-residual-robustness.mjs",
     "v5:artifact": "node scripts/build-v5-prospective-artifact.mjs",

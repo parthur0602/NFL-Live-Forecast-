@@ -61,6 +61,17 @@ type CurrentGame = {
   statusDetail: string | null;
 };
 
+function isPreKickoffCaptureEligible(game: CurrentGame, capturedAt: string) {
+  // A provider's event status is authoritative for this safety check. The
+  // timestamp is a second, independent guard for a stale `scheduled` status.
+  // When either fact is absent or contradictory, preserve the integrity of the
+  // prospective ledger by not writing a snapshot.
+  if (game.gameState !== 'scheduled') return false;
+  const kickoff = Date.parse(game.scheduledKickoffAt ?? '');
+  const captured = Date.parse(capturedAt);
+  return Number.isFinite(kickoff) && Number.isFinite(captured) && captured < kickoff;
+}
+
 function scheduleGameState(event: ScheduleEvent): CurrentGame['gameState'] {
   const state = event.status?.type?.state?.toLowerCase();
   if (event.status?.type?.completed || state === 'post') return 'final';
@@ -124,7 +135,10 @@ export async function GET(request: Request) {
     ]);
     const capturedAt = new Date().toISOString();
     const byGame = new Map(lines.map((line) => [line.gameKey, line]));
-    const marketForSlate = games.flatMap((game) => {
+    const preKickoffGames = games.filter((game) =>
+      isPreKickoffCaptureEligible(game, capturedAt),
+    );
+    const marketForSlate = preKickoffGames.flatMap((game) => {
       const line = byGame.get(game.gameKey);
       return line
         ? [{ ...line, source: MARKET_SOURCE_LABEL, observedAt: capturedAt }]
@@ -180,7 +194,16 @@ export async function GET(request: Request) {
         v5Available: v5.available,
       };
     });
-    const capture = await captureProspectiveRows(db, pairs, capturedAt);
+    // Keep displaying the full slate, but only preserve a market or paired
+    // forecast row while the game is independently confirmed as pre-kickoff.
+    // This prevents postgame odds/source responses from entering either ledger.
+    const capture = await captureProspectiveRows(
+      db,
+      pairs.filter((pair, index) =>
+        isPreKickoffCaptureEligible(games[index]!, capturedAt),
+      ),
+      capturedAt,
+    );
     return NextResponse.json(
       {
         season: SEASON,
@@ -193,6 +216,7 @@ export async function GET(request: Request) {
           productionInfluence: 0,
         },
         capture,
+        skippedAfterKickoff: games.length - preKickoffGames.length,
         // `pairs` is created from `games` above in the same order. Keep every
         // schedule event in the response, including in-progress and completed
         // games; the capture layer separately prevents post-kickoff snapshots.
