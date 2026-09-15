@@ -85,6 +85,19 @@ type SlateGame = {
   featureDataThroughWeek: number | null;
   v5Available: boolean;
   v5UnavailableReason: string | null;
+  v7ShadowProbability: number;
+  v7ShadowPick: string;
+  v7FootballProbability: number | null;
+  v7MatchupProbability: number | null;
+  v7UpsetRisk: string;
+  v7UpsetHomeAdjustment: number | null;
+  v7Available: boolean;
+  v7UnavailableReason: string | null;
+  v7FeatureDataThroughWeek: number | null;
+  v7MinusV2ProbabilityDelta: number;
+  whyV7Differs: Record<string, unknown>;
+  playerAvailability: Record<string, unknown>;
+  dataLastUpdated: string;
   market: Market | null;
 };
 type Slate = {
@@ -106,6 +119,16 @@ type Slate = {
   };
   games: SlateGame[];
   v5Artifact: { version: string; hash: string; productionInfluence: number };
+  v7Artifact: { version: string; hash: string; productionInfluence: number };
+  v7Capture: {
+    attempted: number;
+    accepted: number;
+    skippedAfterKickoff: number;
+    inserted: number;
+    duplicateOrExisting: number;
+    horizonsCaptured: Array<{ gameKey: string; target: string; status: string; actualHorizonMinutes: number }>;
+    horizonsWaiting: Array<{ gameKey: string; reason: string }>;
+  };
   error?: string;
   detail?: string;
 };
@@ -366,6 +389,18 @@ function LoadingSlate() {
   return <div className="grid gap-3 lg:grid-cols-2">{[1, 2, 3, 4].map((item) => <Skeleton key={item} className="h-64 rounded-2xl bg-slate-800" />)}</div>;
 }
 
+function V7ShadowScoreboard({ data }: { data: Record<string, unknown> | null }) {
+  const v2 = data?.v2 as Record<string, unknown> | undefined;
+  const v7 = data?.v7 as Record<string, unknown> | undefined;
+  const headToHead = data?.headToHead as Record<string, unknown> | undefined;
+  const gradedGames = asNumber(data?.games) ?? 0;
+  return <section className="mb-6 rounded-2xl border border-violet-400/25 bg-violet-400/[.06] p-4 sm:p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-[10px] font-bold tracking-[0.18em] text-violet-200 uppercase">V7 prospective scoreboard</p><h2 className="mt-1 text-xl font-black text-white">V2 is official. V7 remains an ungraded shadow.</h2><p className="mt-1 text-sm text-slate-300">Only frozen pre-kickoff captures are scored. V7 never changes the live V2 pick, confidence rank, or betting display.</p></div><Pill tone="blue">PRODUCTION INFLUENCE 0</Pill></div>
+    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><DataCell label="Settled, paired games" value={number(gradedGames, 0)} /><DataCell label="V2 Brier / accuracy" value={gradedGames ? `${number(asNumber(v2?.brier), 4)} / ${pct(asNumber(v2?.accuracy))}` : 'Not graded'} /><DataCell label="V7 Brier / accuracy" value={gradedGames ? `${number(asNumber(v7?.brier), 4)} / ${pct(asNumber(v7?.accuracy))}` : 'Not graded'} /><DataCell label="Winner disagreements" value={number(asNumber(headToHead?.winnerDisagreements), 0)} /></div>
+    <p className="mt-4 text-xs text-violet-100/75">{asText(data?.promotionGate) ?? 'No promotion gate is available.'}</p>
+  </section>;
+}
+
 export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const [week, setWeek] = useState(1);
   const [slate, setSlate] = useState<Slate | null>(null);
@@ -374,6 +409,7 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const [historical, setHistorical] = useState<Record<string, unknown> | null>(null);
   const [research, setResearch] = useState<Record<string, unknown> | null>(null);
   const [exam, setExam] = useState<Record<string, unknown> | null>(null);
+  const [v7Exam, setV7Exam] = useState<Record<string, unknown> | null>(null);
   const [live, setLive] = useState<Record<string, unknown> | null>(null);
   const [slateError, setSlateError] = useState<string | null>(null);
   const [slowError, setSlowError] = useState<string | null>(null);
@@ -417,12 +453,13 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
   const refreshSlow = useCallback(async (requestedWeek: number) => {
     try {
       setSlowError(null);
-      const [state, learn, history, study, report, news] = await Promise.all([
+      const [state, learn, history, study, report, v7Report, news] = await Promise.all([
         getJson<DashboardData>(`/api/dashboard?week=${requestedWeek}`),
         getJson<Learning>('/api/learning'),
         getJson<Record<string, unknown>>('/api/historical'),
         getJson<Record<string, unknown>>('/api/research'),
         getJson<Record<string, unknown>>('/api/prospective-exam?report=1'),
+        getJson<Record<string, unknown>>('/api/prospective-exam?v7Report=1'),
         getJson<Record<string, unknown>>('/api/live'),
       ]);
       setDashboard(state);
@@ -430,6 +467,7 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
       setHistorical(history);
       setResearch(study);
       setExam(report);
+      setV7Exam(v7Report);
       setLive(news);
     } catch (error) {
       setSlowError(error instanceof Error ? error.message : 'Research state could not refresh.');
@@ -443,6 +481,13 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
     const timer = window.setInterval(() => void refreshSlate(week), AUTO_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [week, refreshSlate]);
+  useEffect(() => {
+    let active = true;
+    void getJson<Record<string, unknown>>('/api/prospective-exam?v7Report=1')
+      .then((value) => { if (active) setV7Exam(value); })
+      .catch(() => { /* The weekly V2 board stays usable if research is unavailable. */ });
+    return () => { active = false; };
+  }, []);
   useEffect(() => {
     if (!selected) return;
     let active = true;
@@ -465,6 +510,7 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
       { label: 'NFL schedule', state: slateError ? 'Error' : currentGames.length ? 'Healthy' : 'Unavailable', detail: slate ? `${slate.scheduleSource ?? 'schedule source'} · ${relative(slate.retrievedAt)}` : slateError ?? 'Awaiting schedule refresh' },
       { label: 'Market source', state: currentGames.some((game) => game.market) ? 'Healthy' : 'Unavailable', detail: currentGames.find((game) => game.market)?.marketSource ?? slate?.marketWarning ?? 'No usable current market line' },
       { label: '2026 team efficiency', state: slateV5Available ? 'Healthy' : 'Unavailable', detail: slateV5Available ? 'Prior-week data available' : v5Reason ?? 'No prior-week team data' },
+      { label: 'V7 shadow evidence', state: slate?.v7Artifact.productionInfluence === 0 ? 'Healthy' : 'Error', detail: slate?.v7Artifact ? `${slate.v7Artifact.version}; ${slate.v7Capture?.horizonsCaptured.length ?? 0} horizon captures this refresh; influence 0` : 'Not refreshed' },
       { label: 'News feed', state: live ? 'Healthy' : 'Unavailable', detail: asText(live?.feedStatus) ?? 'Not refreshed' },
       { label: 'D1 database', state: dashboard?.error ? 'Error' : dashboard ? 'Healthy' : 'Unavailable', detail: dashboard?.databaseCheckedAt ?? dashboard?.detail ?? 'Not refreshed' },
       { label: 'Prospective exam', state: slate?.captureWarning ? 'Unavailable' : slate?.capture ? 'Healthy' : 'Unavailable', detail: slate?.captureWarning ?? (slate?.capture ? `${slate.capture.inserted} inserted; ${slate.capture.duplicateOrExisting} hourly deduplicated` : 'Not refreshed') },
@@ -480,9 +526,9 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
       <div className="relative mx-auto max-w-[1600px] px-4 py-5 sm:px-6 lg:px-8">
         <header className="mb-6 flex flex-col gap-5 border-b border-white/10 pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone="green">OFFICIAL · V2 PRODUCTION</Pill><Pill tone="blue">2026–27</Pill><Pill tone="amber">SHADOW · V5 / V6 RESEARCH</Pill></div>
+            <div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone="green">OFFICIAL · V2 PRODUCTION</Pill><Pill tone="blue">2026–27</Pill><Pill tone="amber">SHADOW · V5 / V6 / V7 RESEARCH</Pill></div>
             <h1 className="text-3xl font-black tracking-tight text-white sm:text-4xl">NFL Live Forecast</h1>
-            <p className="mt-1 max-w-3xl text-sm text-slate-400">Server-computed market-first forecasts, a strictly prospective V5 exam, and research evidence kept separate from production.</p>
+            <p className="mt-1 max-w-3xl text-sm text-slate-400">Server-computed market-first forecasts, strictly prospective V5/V7 exams, and research evidence kept separate from production.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-400">Week <select aria-label="Forecast week" value={week} onChange={(event) => setWeek(Number(event.target.value))} className="ml-1 bg-transparent font-bold text-white outline-none">{Array.from({ length: 18 }, (_, index) => <option className="bg-slate-900" key={index + 1} value={index + 1}>{index + 1}</option>)}</select></label>
@@ -502,11 +548,12 @@ export function LiveDashboard({ onOpenLegacy }: { onOpenLegacy: () => void }) {
         {slateError && <div className="mb-5"><ErrorBox message={slateError} /></div>}
         {slowError && <div className="mb-5"><ErrorBox message={`Research details: ${slowError}`} /></div>}
 
+        <V7ShadowScoreboard data={v7Exam} />
         <CurrentSlate week={week} games={currentGames} loading={!slate && !slateError} onSelect={setSelected} marketHistory={dashboard?.marketHistory ?? []} prospectiveHistory={dashboard?.prospectiveHistory ?? []} />
         <WinnerPicks games={currentGames} loading={!slate && !slateError} />
         <MondayNightTotals games={currentGames} loading={!slate && !slateError} />
       </div>
-      <ResearchLabDialog open={researchOpen} onOpenChange={setResearchOpen} exam={exam} slate={slate} historical={historical} research={research} dashboard={dashboard} live={live} learning={learning} systems={systems} atlasSort={atlasSort} setAtlasSort={setAtlasSort} />
+      <ResearchLabDialog open={researchOpen} onOpenChange={setResearchOpen} exam={exam} v7Exam={v7Exam} slate={slate} historical={historical} research={research} dashboard={dashboard} live={live} learning={learning} systems={systems} atlasSort={atlasSort} setAtlasSort={setAtlasSort} />
       <GameDetail game={selected} onClose={() => setSelected(null)} detail={detail} detailError={detailError} />
     </main>
   );
@@ -535,6 +582,16 @@ function CurrentSlate({ week, games, loading, onSelect, marketHistory, prospecti
   </section>;
 }
 
+function v7PlayerResearchLabel(game: SlateGame) {
+  const away = game.playerAvailability?.away as Record<string, unknown> | undefined;
+  const home = game.playerAvailability?.home as Record<string, unknown> | undefined;
+  const teams = [away, home].filter((team): team is Record<string, unknown> => Boolean(team));
+  const explicitlyOut = teams.reduce((sum, team) => sum + (asNumber((team.inactiveCoverage as Record<string, unknown> | undefined)?.explicitOutInjuryReports) ?? 0), 0);
+  const matched = teams.reduce((sum, team) => sum + (asNumber((team.playerValueCoverage as Record<string, unknown> | undefined)?.activeRosterPlayersMatchedToResearchArtifact) ?? 0), 0);
+  if (explicitlyOut) return `V7 player research: ${explicitlyOut} explicitly unavailable player${explicitlyOut === 1 ? '' : 's'} captured.`;
+  return matched ? `V7 player research: ${matched} active historical-value matches; no official inactive list.` : 'V7 player research: player coverage is unavailable.';
+}
+
 function GameCard({ game, onClick, marketHistory, prospectiveHistory, rank, totalRanks }: { game: SlateGame; onClick: () => void; marketHistory: Array<Record<string, unknown>>; prospectiveHistory: Array<Record<string, unknown>>; rank: number; totalRanks: number }) {
   const v2Away = 1 - game.v2OfficialProbability;
   const marketRows = marketHistory.filter((row) => row.game_key === game.gameKey);
@@ -542,10 +599,11 @@ function GameCard({ game, onClick, marketHistory, prospectiveHistory, rank, tota
   const movement = currentMovement(marketRows, modelRows);
   const winnerProbability = officialWinnerProbability(game);
   return <button type="button" onClick={onClick} className="group w-full rounded-2xl border border-white/10 bg-gradient-to-br from-[#0d2133] to-[#081725] p-4 text-left shadow-lg shadow-black/10 transition hover:border-sky-300/35 hover:from-[#10283d] focus:outline-none focus:ring-2 focus:ring-sky-300/50">
-    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill><Pill tone="green">V2 OFFICIAL</Pill>{game.gameState !== 'scheduled' && <Pill tone="neutral">PREGAME PICK LOCKED</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
+    <div className="flex items-start justify-between gap-3"><div><div className="mb-2 flex flex-wrap items-center gap-2"><Pill tone={gameStatusTone(game)}>{gameStatus(game)}</Pill><Pill tone="green">V2 OFFICIAL</Pill><Pill tone="blue">V7 SHADOW</Pill>{game.gameState !== 'scheduled' && <Pill tone="neutral">PREGAME PICK LOCKED</Pill>}</div><p className="text-xs text-slate-400">{time(game.scheduledKickoffAt)}</p></div><ChevronRight className="mt-2 size-5 text-slate-500 transition group-hover:text-sky-300" /></div>
     <div className="mt-4 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-3"><div><p className="truncate text-lg font-black text-white">{game.away}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Away · {pct(v2Away)}</p></div><span className="pb-1 text-xs font-bold text-slate-600">at</span><div className="text-right"><p className="truncate text-lg font-black text-white">{game.home}</p><p className="mt-1 text-[10px] tracking-[0.13em] text-slate-500 uppercase">Home · {pct(game.v2OfficialProbability)}</p></div></div>
     <div className="mt-4 grid gap-3 border-y border-white/8 py-3 sm:grid-cols-[minmax(0,1fr)_auto]"><div><p className="text-[10px] font-bold tracking-[0.14em] text-emerald-300 uppercase">Official winner</p><p className="mt-1 text-xl font-black text-white">{game.v2OfficialPick}</p><p className="mt-1 text-sm font-semibold text-emerald-100">{pct(winnerProbability)} chance to win</p></div><div className={`rounded-xl border px-3 py-2 text-right ${rank === totalRanks ? 'border-amber-300/35 bg-amber-300/10 text-amber-100' : 'border-sky-300/25 bg-sky-300/10 text-sky-100'}`}><p className="text-[10px] font-bold tracking-[0.12em] uppercase">Confidence</p><p className="mt-1 text-lg font-black">{rank} / {totalRanks}</p><p className="text-[11px]">{rank === 1 ? 'Lowest' : rank === totalRanks ? 'Highest' : 'Ranked'}</p></div></div>
-    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-slate-400">Click for the locked pregame record and market detail.</span>{movement && <span className="flex items-center gap-1 text-sky-200"><Activity className="size-3.5" />{movement.replace('Observed change: ', '')}</span>}</div>
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-slate-400">{game.v7Available ? `V7 shadow: ${game.v7ShadowPick} · Δ ${(game.v7MinusV2ProbabilityDelta * 100).toFixed(1)} pp · ${game.v7UpsetRisk} upset risk.` : `V7 shadow unavailable: ${game.v7UnavailableReason ?? 'verified prior-week inputs are not available.'}`}</span>{movement && <span className="flex items-center gap-1 text-sky-200"><Activity className="size-3.5" />{movement.replace('Observed change: ', '')}</span>}</div>
+    <p className="mt-2 text-[11px] text-slate-500">{v7PlayerResearchLabel(game)}</p>
   </button>;
 }
 
@@ -576,7 +634,7 @@ function currentMovement(marketRows: Array<Record<string, unknown>>, modelRows: 
 function DataCell({ label, value }: { label: string; value: string }) { return <div><p className="text-[10px] tracking-[0.11em] text-slate-500 uppercase">{label}</p><p className="mt-1 truncate font-semibold text-slate-200">{value}</p></div>; }
 function SectionHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail?: string }) { return <div className="mb-4"><p className="text-[10px] font-bold tracking-[0.18em] text-sky-300 uppercase">{eyebrow}</p><h2 className="mt-1 text-2xl font-black tracking-tight text-white">{title}</h2>{detail && <p className="mt-1 text-sm text-slate-400">{detail}</p>}</div>; }
 
-function ResearchLabDialog({ open, onOpenChange, exam, slate, historical, research, dashboard, live, learning, systems, atlasSort, setAtlasSort }: { open: boolean; onOpenChange: (open: boolean) => void; exam: Record<string, unknown> | null; slate: Slate | null; historical: Record<string, unknown> | null; research: Record<string, unknown> | null; dashboard: DashboardData | null; live: Record<string, unknown> | null; learning: Learning | null; systems: Array<{ label: string; state: string; detail: string }>; atlasSort: 'positive' | 'negative' | 'sample' | 'z'; setAtlasSort: (sort: 'positive' | 'negative' | 'sample' | 'z') => void }) {
+function ResearchLabDialog({ open, onOpenChange, exam, v7Exam, slate, historical, research, dashboard, live, learning, systems, atlasSort, setAtlasSort }: { open: boolean; onOpenChange: (open: boolean) => void; exam: Record<string, unknown> | null; v7Exam: Record<string, unknown> | null; slate: Slate | null; historical: Record<string, unknown> | null; research: Record<string, unknown> | null; dashboard: DashboardData | null; live: Record<string, unknown> | null; learning: Learning | null; systems: Array<{ label: string; state: string; detail: string }>; atlasSort: 'positive' | 'negative' | 'sample' | 'z'; setAtlasSort: (sort: 'positive' | 'negative' | 'sample' | 'z') => void }) {
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] max-w-[calc(100%-1rem)] overflow-y-auto border border-white/15 bg-[#091725] p-0 text-slate-100 sm:max-w-7xl"><div className="p-5 sm:p-6"><DialogHeader><DialogTitle className="text-2xl font-black text-white">Research / Model Lab</DialogTitle><DialogDescription className="text-slate-400">Historical replay, V5 shadow evidence, failure analysis, football-state research, and learning memory. Nothing here changes production picks.</DialogDescription></DialogHeader><Tabs defaultValue="exam" className="mt-5 gap-5"><div className="overflow-x-auto border-y border-white/10 bg-[#081522] py-2"><TabsList variant="line" className="h-auto min-w-max gap-1 p-0"><TabsTrigger value="exam" className="px-3 py-2 text-xs">V2 vs V5</TabsTrigger><TabsTrigger value="history" className="px-3 py-2 text-xs">Historical</TabsTrigger><TabsTrigger value="atlas" className="px-3 py-2 text-xs">Failure atlas</TabsTrigger><TabsTrigger value="research" className="px-3 py-2 text-xs">Football state</TabsTrigger><TabsTrigger value="learning" className="px-3 py-2 text-xs">Self-learning</TabsTrigger></TabsList></div><TabsContent value="exam"><ExamPanel exam={exam} slate={slate} /></TabsContent><TabsContent value="history"><HistoryPanel historical={historical} research={research} /></TabsContent><TabsContent value="atlas"><FailureAtlas research={research} sort={atlasSort} setSort={setAtlasSort} /></TabsContent><TabsContent value="research"><ResearchPanel dashboard={dashboard} live={live} /></TabsContent><TabsContent value="learning"><LearningPanel learning={learning} dashboard={dashboard} systems={systems} /></TabsContent></Tabs></div></DialogContent></Dialog>;
 }
 

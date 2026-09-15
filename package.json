@@ -17,6 +17,7 @@
     "model:v7": "node scripts/build-v7-intelligence-engine.mjs",
     "v7:artifact": "node scripts/build-v7-prospective-artifact.mjs",
     "audit:upsets": "node scripts/build-v7-upset-audit.mjs",
+    "audit:v7.1": "node scripts/build-v7-upset-v71.mjs",
     "player:value": "node scripts/build-v7-player-value.mjs",
     "test:v7": "node scripts/test-v7-shadow-schema.mjs",
     "v7:preview:prepare": "node scripts/prepare-v7-preview-db.mjs",

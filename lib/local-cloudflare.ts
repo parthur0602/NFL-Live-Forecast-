@@ -304,6 +304,9 @@ database.exec(`
     home_team TEXT NOT NULL,
     scheduled_kickoff_at TEXT NOT NULL,
     capture_bucket TEXT NOT NULL,
+    capture_horizon TEXT NOT NULL DEFAULT 'LEGACY_HOURLY',
+    actual_horizon_minutes REAL,
+    horizon_status TEXT NOT NULL DEFAULT 'LEGACY',
     captured_at TEXT NOT NULL,
     feature_cutoff_at TEXT NOT NULL,
     market_observed_at TEXT,
@@ -332,6 +335,8 @@ database.exec(`
     team_efficiency_json TEXT NOT NULL,
     specialist_outputs_json TEXT NOT NULL,
     source_status_json TEXT NOT NULL,
+    player_intelligence_json TEXT NOT NULL DEFAULT '{}',
+    why_v7_differs_json TEXT NOT NULL DEFAULT '[]',
     production_influence REAL DEFAULT 0 NOT NULL,
     settled_at TEXT,
     away_score INTEGER,
@@ -340,8 +345,8 @@ database.exec(`
     correct INTEGER,
     postmortem_json TEXT
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS uq_v7_intelligence_game_bucket
-    ON v7_intelligence_snapshots (season, game_key, capture_bucket);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_v7_intelligence_game_horizon_bucket
+    ON v7_intelligence_snapshots (season, game_key, capture_horizon, capture_bucket);
   CREATE INDEX IF NOT EXISTS idx_v7_intelligence_season_week
     ON v7_intelligence_snapshots (season, week);
   CREATE INDEX IF NOT EXISTS idx_v7_intelligence_game_time

@@ -10,6 +10,70 @@ type D1Statement = {
 
 type D1Database = { prepare(sql: string): D1Statement };
 
+export const V7_CAPTURE_TARGETS = ['OPENING', '72H', '24H', '6H', '90M', 'FINAL_PREKICK'] as const;
+export type V7CaptureTarget = (typeof V7_CAPTURE_TARGETS)[number] | 'CURRENT_BASELINE';
+export type V7HorizonStatus = 'ON_TIME' | 'LATE' | 'BASELINE' | 'LEGACY';
+
+export type V7CapturePlan = {
+  target: V7CaptureTarget;
+  actualHorizonMinutes: number;
+  status: V7HorizonStatus;
+};
+
+const TARGET_MINUTES: Record<Exclude<V7CaptureTarget, 'OPENING' | 'CURRENT_BASELINE'>, number> = {
+  '72H': 72 * 60,
+  '24H': 24 * 60,
+  '6H': 6 * 60,
+  '90M': 90,
+  FINAL_PREKICK: 15,
+};
+
+/**
+ * Chooses one honest, immutable capture for a dashboard refresh. A missed
+ * historical target is never backfilled under its old timestamp; the first
+ * available retrieval is stored as CURRENT_BASELINE instead.
+ */
+export function nextV7CapturePlan(
+  scheduledKickoffAt: string,
+  now: Date,
+  alreadyCaptured: ReadonlySet<string>,
+): V7CapturePlan | null {
+  const minutes = (new Date(scheduledKickoffAt).getTime() - now.getTime()) / 60_000;
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  if (!alreadyCaptured.has('CURRENT_BASELINE'))
+    return { target: 'CURRENT_BASELINE', actualHorizonMinutes: minutes, status: 'BASELINE' };
+  for (const target of ['72H', '24H', '6H', '90M', 'FINAL_PREKICK'] as const) {
+    const expected = TARGET_MINUTES[target];
+    if (alreadyCaptured.has(target) || minutes > expected) continue;
+    const toleranceMinutes = target === 'FINAL_PREKICK' ? 5 : Math.max(15, expected * 0.08);
+    return {
+      target,
+      actualHorizonMinutes: minutes,
+      status: Math.abs(minutes - expected) <= toleranceMinutes ? 'ON_TIME' : 'LATE',
+    };
+  }
+  return null;
+}
+
+type HorizonRow = { game_key: string; capture_horizon: string };
+
+export async function v7CapturedHorizons(
+  db: D1Database,
+  season: number,
+  week: number,
+) {
+  const result = await db
+    .prepare(
+      `SELECT game_key, capture_horizon FROM v7_intelligence_snapshots WHERE season = ? AND week = ?`,
+    )
+    .bind(season, week)
+    .all<HorizonRow>();
+  const byGame = new Map<string, Set<string>>();
+  for (const row of result.results)
+    (byGame.get(row.game_key) ?? byGame.set(row.game_key, new Set()).get(row.game_key)!).add(row.capture_horizon);
+  return byGame;
+}
+
 export type V7SnapshotInput = {
   season: number;
   week: number;
@@ -17,6 +81,7 @@ export type V7SnapshotInput = {
   awayTeam: string;
   homeTeam: string;
   scheduledKickoffAt: string;
+  capture: V7CapturePlan;
   featureCutoffAt: string;
   market: {
     observedAt: string | null;
@@ -49,6 +114,8 @@ export type V7SnapshotInput = {
   teamEfficiency: unknown;
   specialists: unknown;
   sourceStatus: unknown;
+  playerIntelligence: unknown;
+  whyV7Differs: unknown;
 };
 
 function captureBucket(instant: Date) {
@@ -70,7 +137,8 @@ export async function saveV7ShadowSnapshot(
     .prepare(
       `INSERT OR IGNORE INTO v7_intelligence_snapshots (
         season, week, game_key, away_team, home_team, scheduled_kickoff_at,
-        capture_bucket, captured_at, feature_cutoff_at, market_observed_at,
+        capture_bucket, capture_horizon, actual_horizon_minutes, horizon_status,
+        captured_at, feature_cutoff_at, market_observed_at,
         market_source, market_home_probability, away_moneyline, home_moneyline,
         home_spread, total_line, v2_home_probability, v2_predicted_winner,
         v2_model_version, football_home_probability,
@@ -78,12 +146,13 @@ export async function saveV7ShadowSnapshot(
         upset_home_adjustment, final_home_probability, predicted_winner, model_version, model_hash,
         team_ratings_json, player_availability_json, depth_chart_json,
         weather_rest_travel_json, team_efficiency_json, specialist_outputs_json,
-        source_status_json, production_influence
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+        source_status_json, player_intelligence_json, why_v7_differs_json, production_influence
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     )
     .bind(
       input.season, input.week, input.gameKey, input.awayTeam, input.homeTeam,
-      input.scheduledKickoffAt, captureBucket(new Date(now)), capturedAt,
+      input.scheduledKickoffAt, captureBucket(new Date(now)), input.capture.target,
+      input.capture.actualHorizonMinutes, input.capture.status, capturedAt,
       input.featureCutoffAt, input.market.observedAt, input.market.source,
       input.market.homeProbability, input.market.awayMoneyline,
       input.market.homeMoneyline, input.market.homeSpread, input.market.totalLine,
@@ -96,6 +165,7 @@ export async function saveV7ShadowSnapshot(
       JSON.stringify(input.playerAvailability), JSON.stringify(input.depthChart),
       JSON.stringify(input.weatherRestTravel), JSON.stringify(input.teamEfficiency),
       JSON.stringify(input.specialists), JSON.stringify(input.sourceStatus),
+      JSON.stringify(input.playerIntelligence), JSON.stringify(input.whyV7Differs),
     )
     .run() as { meta?: { changes?: number } } | undefined;
 

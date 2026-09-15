@@ -36,8 +36,16 @@ import {
 } from '@/lib/v7-prospective-shadow';
 import { collectCurrentPlayerAvailability } from '@/lib/player-availability-sources';
 import { savePlayerAvailability } from '@/lib/player-availability';
-import { saveV7ShadowSnapshot } from '@/lib/v7-shadow-snapshot';
+import {
+  nextV7CapturePlan,
+  saveV7ShadowSnapshot,
+  v7CapturedHorizons,
+} from '@/lib/v7-shadow-snapshot';
 import { v7ProspectiveScoreboard } from '@/lib/v7-prospective-scoreboard';
+import {
+  buildV7PlayerIntelligence,
+  v7DifferenceExplanation,
+} from '@/lib/v7-player-intelligence';
 
 const SEASON = 2026;
 const SCHEDULE_SOURCE =
@@ -379,6 +387,26 @@ export async function GET(request: Request) {
         efficiencyRows: v7Efficiency.rows,
         unavailableReason: v7Efficiency.reason,
       });
+      const v7PlayerIntelligence = buildV7PlayerIntelligence({
+        sourceHealth: availability.sourceHealth,
+        away: {
+          team: game.awayTeam,
+          availability: availability.playerPayloadByTeam[TEAM_CODES[game.awayTeam] ?? game.awayTeam] ?? [],
+          depth: availability.depthPayloadByTeam[TEAM_CODES[game.awayTeam] ?? game.awayTeam] ?? [],
+        },
+        home: {
+          team: game.homeTeam,
+          availability: availability.playerPayloadByTeam[TEAM_CODES[game.homeTeam] ?? game.homeTeam] ?? [],
+          depth: availability.depthPayloadByTeam[TEAM_CODES[game.homeTeam] ?? game.homeTeam] ?? [],
+        },
+      });
+      const whyV7Differs = v7DifferenceExplanation({
+        v2HomeProbability: v2,
+        v7HomeProbability: v7.finalHomeProbability,
+        v7Available: v7.available,
+        rawResidualLogit: v7.featurePayload.rawResidualLogit,
+        playerIntelligence: v7PlayerIntelligence,
+      });
       return {
         season: SEASON,
         ...game,
@@ -415,6 +443,8 @@ export async function GET(request: Request) {
         },
         v5Available: v5.available,
         v7,
+        v7PlayerIntelligence,
+        whyV7Differs,
       };
     });
     // Keep displaying the full slate, but only preserve a market or paired
@@ -436,6 +466,8 @@ export async function GET(request: Request) {
       skippedAfterKickoff: 0,
       inserted: 0,
       duplicateOrExisting: 0,
+      horizonsCaptured: [] as Array<{ gameKey: string; target: string; status: string; actualHorizonMinutes: number }> ,
+      horizonsWaiting: [] as Array<{ gameKey: string; reason: string }> ,
     };
     try {
       if (marketForSlate.length) await saveMarketSnapshots(marketForSlate);
@@ -493,8 +525,17 @@ export async function GET(request: Request) {
         skippedAfterKickoff: pairs.length - v7Pairs.length,
         inserted: 0,
         duplicateOrExisting: 0,
+        horizonsCaptured: [],
+        horizonsWaiting: [],
       };
+      const existingHorizons = await v7CapturedHorizons(db, SEASON, week);
       for (const pair of v7Pairs) {
+        const horizons = existingHorizons.get(pair.gameKey) ?? new Set<string>();
+        const plan = nextV7CapturePlan(pair.scheduledKickoffAt!, new Date(capturedAt), horizons);
+        if (!plan) {
+          v7Capture.horizonsWaiting.push({ gameKey: pair.gameKey, reason: 'All currently due V7 capture targets were already stored.' });
+          continue;
+        }
         const saved = await saveV7ShadowSnapshot(db, {
           season: SEASON,
           week: pair.week,
@@ -502,6 +543,7 @@ export async function GET(request: Request) {
           awayTeam: pair.awayTeam,
           homeTeam: pair.homeTeam,
           scheduledKickoffAt: pair.scheduledKickoffAt!,
+          capture: plan,
           featureCutoffAt: capturedAt,
           market: {
             observedAt: pair.marketObservedAt,
@@ -551,9 +593,21 @@ export async function GET(request: Request) {
             teamEfficiency: v7Efficiency.reason ? 'UNAVAILABLE' : 'AVAILABLE',
             playerAvailability: availability.sourceHealth,
           },
+          playerIntelligence: pair.v7PlayerIntelligence,
+          whyV7Differs: pair.whyV7Differs,
         }, new Date(capturedAt));
         if (saved.captured) {
           v7Capture.accepted += 1;
+          if (saved.inserted === true) {
+            horizons.add(plan.target);
+            existingHorizons.set(pair.gameKey, horizons);
+            v7Capture.horizonsCaptured.push({
+              gameKey: pair.gameKey,
+              target: plan.target,
+              status: plan.status,
+              actualHorizonMinutes: plan.actualHorizonMinutes,
+            });
+          }
           if (saved.inserted === true) v7Capture.inserted += 1;
           else if (saved.inserted === false) v7Capture.duplicateOrExisting += 1;
         }
@@ -627,6 +681,10 @@ export async function GET(request: Request) {
           v7Available: pair.v7.available,
           v7UnavailableReason: pair.v7.reason,
           v7FeatureDataThroughWeek: pair.v7.featureDataThroughWeek,
+          v7MinusV2ProbabilityDelta: pair.v7.finalHomeProbability - pair.v2HomeProbability,
+          whyV7Differs: pair.whyV7Differs,
+          playerAvailability: pair.v7PlayerIntelligence,
+          dataLastUpdated: capturedAt,
           market: (() => {
             const line = byGame.get(pair.gameKey);
             if (!line) return null;

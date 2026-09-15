@@ -160,6 +160,9 @@ export const v7IntelligenceSnapshots = sqliteTable(
     homeTeam: text('home_team').notNull(),
     scheduledKickoffAt: text('scheduled_kickoff_at').notNull(),
     captureBucket: text('capture_bucket').notNull(),
+    captureHorizon: text('capture_horizon').notNull().default('LEGACY_HOURLY'),
+    actualHorizonMinutes: real('actual_horizon_minutes'),
+    horizonStatus: text('horizon_status').notNull().default('LEGACY'),
     capturedAt: text('captured_at').notNull(),
     featureCutoffAt: text('feature_cutoff_at').notNull(),
     marketObservedAt: text('market_observed_at'),
@@ -188,6 +191,8 @@ export const v7IntelligenceSnapshots = sqliteTable(
     teamEfficiencyJson: text('team_efficiency_json').notNull(),
     specialistOutputsJson: text('specialist_outputs_json').notNull(),
     sourceStatusJson: text('source_status_json').notNull(),
+    playerIntelligenceJson: text('player_intelligence_json').notNull().default('{}'),
+    whyV7DiffersJson: text('why_v7_differs_json').notNull().default('[]'),
     productionInfluence: real('production_influence').notNull().default(0),
     settledAt: text('settled_at'),
     awayScore: integer('away_score'),
@@ -197,9 +202,10 @@ export const v7IntelligenceSnapshots = sqliteTable(
     postmortemJson: text('postmortem_json'),
   },
   (table) => [
-    uniqueIndex('uq_v7_intelligence_game_bucket').on(
+    uniqueIndex('uq_v7_intelligence_game_horizon_bucket').on(
       table.season,
       table.gameKey,
+      table.captureHorizon,
       table.captureBucket,
     ),
     index('idx_v7_intelligence_season_week').on(table.season, table.week),

@@ -669,18 +669,29 @@ export function special2026Reviews(data) {
 export function buildPlayerValueOutput(data) {
   const rows = data.playerStats?.get(2025)?.filter((row) => row.season_type === 'REG') ?? [];
   const players = new Map();
+  const teamUsage = new Map();
   for (const row of rows) {
+    const usage = teamUsage.get(row.team) ?? { targets: 0, carries: 0 };
+    usage.targets += num(row, 'targets') ?? 0;
+    usage.carries += num(row, 'carries') ?? 0;
+    teamUsage.set(row.team, usage);
     const id = row.player_id || `${row.player_display_name}|${row.team}|${row.position}`;
     const current = players.get(id) ?? {
       playerId: row.player_id || null, player: row.player_display_name || row.player_name,
       team: row.team, position: row.position, passingEpa: 0, rushingEpa: 0, receivingEpa: 0,
       targets: 0, sacks: 0, hits: 0, interceptions: 0, passesDefended: 0, fieldGoalsAboveBaseline: 0,
-      puntNetYards: 0, games: 0,
+      puntNetYards: 0, carries: 0, attempts: 0, completions: 0, passingInterceptions: 0,
+      sacksSuffered: 0, games: 0,
     };
     current.passingEpa += num(row, 'passing_epa') ?? 0;
     current.rushingEpa += num(row, 'rushing_epa') ?? 0;
     current.receivingEpa += num(row, 'receiving_epa') ?? 0;
     current.targets += num(row, 'targets') ?? 0;
+    current.carries += num(row, 'carries') ?? 0;
+    current.attempts += num(row, 'attempts') ?? 0;
+    current.completions += num(row, 'completions') ?? 0;
+    current.passingInterceptions += num(row, 'passing_interceptions') ?? 0;
+    current.sacksSuffered += num(row, 'sacks_suffered') ?? 0;
     current.sacks += num(row, 'def_sacks') ?? 0;
     current.hits += num(row, 'def_qb_hits') ?? 0;
     current.interceptions += num(row, 'def_interceptions') ?? 0;
@@ -696,7 +707,12 @@ export function buildPlayerValueOutput(data) {
     if (['WR', 'TE'].includes(player.position)) return player.receivingEpa;
     if (['K'].includes(player.position)) return player.fieldGoalsAboveBaseline;
     if (['P'].includes(player.position)) return player.puntNetYards / Math.max(1, player.games);
-    return player.sacks * 2 + player.hits * 0.25 + player.interceptions * 3 + player.passesDefended * 0.4;
+    if (['DE', 'DL', 'DT', 'NT', 'EDGE', 'LB', 'CB', 'DB', 'S', 'SAF'].includes(player.position))
+      return player.sacks * 2 + player.hits * 0.25 + player.interceptions * 3 + player.passesDefended * 0.4;
+    // nflverse player statistics contain no blocking/snap/assignment signal
+    // sufficient to rank OL (or other unsupported) positions. Leave them
+    // unavailable rather than assigning a generic value.
+    return null;
   };
   const qualified = [...players.values()].filter((player) => player.games >= 6 && Number.isFinite(signal(player)));
   const grouped = new Map();
@@ -705,12 +721,64 @@ export function buildPlayerValueOutput(data) {
     group.push(signal(player));
     grouped.set(player.position, group);
   }
-  const leaders = qualified.map((player) => {
+  const scored = qualified.map((player) => {
     const group = grouped.get(player.position) ?? [];
     const average = mean(group) ?? 0;
     const sd = Math.sqrt(mean(group.map((value) => (value - average) ** 2)) ?? 0) || 1;
-    return { ...player, productionSignal: signal(player), positionStandardScore: (signal(player) - average) / sd };
-  }).sort((left, right) => right.positionStandardScore - left.positionStandardScore).slice(0, 50);
+    const positionStandardScore = (signal(player) - average) / sd;
+    // Shrink low-game samples back toward a neutral position baseline. This is
+    // a research score, not a point estimate of an injury impact.
+    const sampleShrinkage = player.games / (player.games + 8);
+    const playerValueScore = Math.max(0, Math.min(100, 50 + 12 * positionStandardScore * sampleShrinkage));
+    const team = teamUsage.get(player.team) ?? { targets: 0, carries: 0 };
+    return {
+      ...player,
+      productionSignal: signal(player),
+      positionStandardScore,
+      sampleShrinkage,
+      playerValueScore,
+      targetShare: player.targets && team.targets ? player.targets / team.targets : null,
+      rushShare: player.carries && team.carries ? player.carries / team.carries : null,
+      routeParticipation: null,
+      redZoneUsage: null,
+      thirdDownUsage: null,
+      offensiveSnapShare: null,
+      defensiveSnapShare: null,
+      recentPlayingTimeTrend: null,
+      qbMetrics: player.position === 'QB' ? {
+        attempts: player.attempts,
+        starts: null,
+        passingEpaPerDropback: player.attempts ? player.passingEpa / player.attempts : null,
+        completionPct: player.attempts ? player.completions / player.attempts : null,
+        interceptionRate: player.attempts ? player.passingInterceptions / player.attempts : null,
+        sackRate: player.attempts + player.sacksSuffered
+          ? player.sacksSuffered / (player.attempts + player.sacksSuffered)
+          : null,
+        scrambleRate: null,
+      } : null,
+    };
+  });
+  const replacementPriors = Object.fromEntries(
+    [...new Set(scored.map((player) => player.position))].map((position) => {
+      const values = scored.filter((player) => player.position === position)
+        .map((player) => player.playerValueScore).sort((left, right) => left - right);
+      return [position, values.length ? values[Math.floor(values.length / 2)] : null];
+    }),
+  );
+  const valueRows = scored.map((player) => {
+    const replacementValue = replacementPriors[player.position] ?? null;
+    return {
+      ...player,
+      replacementValue,
+      replacementGap: replacementValue === null ? null : Math.max(0, player.playerValueScore - replacementValue),
+      replacementPlayer: null,
+      replacementQuality: 'POSITION_BASELINE_ONLY',
+      teamDependency: player.targetShare ?? player.rushShare ?? null,
+      sourceSeason: 2025,
+      status: 'RESEARCH_ONLY_POSTGAME_PRODUCTION',
+    };
+  });
+  const leaders = [...valueRows].sort((left, right) => right.playerValueScore - left.playerValueScore).slice(0, 50);
   const coverage = ['QB', 'RB', 'WR', 'TE', 'LT', 'LG', 'C', 'RG', 'RT', 'EDGE', 'DT', 'LB', 'CB', 'S', 'K', 'P'].map((position) => ({
     position,
     productionEvidence: position === 'QB' ? ['passing_epa', 'attempts', 'sacks_suffered']
@@ -734,8 +802,47 @@ export function buildPlayerValueOutput(data) {
       'No availability probability, snap restriction, depth replacement, or injury effect is fabricated from production data.',
     ],
     top50ProductionLeaders: leaders,
+    playerValueRows: valueRows,
     positionCoverage: coverage,
-    replacementValues: 'UNAVAILABLE_PENDING_TIMESTAMPED_STARTER_DEPTH_AND_AVAILABILITY_DATA',
+    replacementValues: {
+      method: 'Position-median production baseline with sample shrinkage; not a named backup estimate.',
+      priors: replacementPriors,
+      namedBackups: 'UNAVAILABLE_PENDING_TIMESTAMPED_DEPTH_RANK_AND_STARTER_SOURCE',
+    },
+  };
+}
+
+export function buildPlayerValueArtifact(data) {
+  const output = buildPlayerValueOutput(data);
+  const artifact = {
+    version: `${V7_CONFIG.version}-PLAYER-VALUE-RESEARCH`,
+    status: 'SHADOW_ONLY',
+    productionInfluence: 0,
+    sourceSeason: 2025,
+    source: 'nflverse stats_player weekly release; postgame production research only',
+    guardrails: output.guardrails,
+    replacementValues: output.replacementValues,
+    // Keep the deployed research artifact intentionally narrow. The full
+    // derivation stays in the generated audit JSON; the Worker only needs
+    // these values to match a current roster without inflating its bundle
+    // with raw postgame totals it never reads at runtime.
+    players: output.playerValueRows.map((player) => ({
+      playerId: player.playerId,
+      player: player.player,
+      position: player.position,
+      playerValueScore: player.playerValueScore,
+      replacementValue: player.replacementValue,
+      replacementGap: player.replacementGap,
+      replacementQuality: player.replacementQuality,
+      targetShare: player.targetShare,
+      rushShare: player.rushShare,
+      sourceSeason: player.sourceSeason,
+      qbMetrics: player.qbMetrics,
+    })),
+  };
+  return {
+    ...artifact,
+    artifactHash: createHash('sha256').update(JSON.stringify(artifact)).digest('hex'),
   };
 }
 
