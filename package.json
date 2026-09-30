@@ -22,6 +22,7 @@
     "test:v7": "node scripts/test-v7-shadow-schema.mjs",
     "v7:preview:prepare": "node scripts/prepare-v7-preview-db.mjs",
     "v7:preview:start": "wrangler dev --config dist/server/wrangler.json --persist-to work/v7-d1-state",
+    "football:intelligence:check": "node scripts/validate-football-intelligence-registry.mjs",
     "shadow:residual": "node scripts/build-shadow-residual-backtest.mjs",
     "residual:robustness": "node scripts/build-residual-robustness.mjs",
     "v5:artifact": "node scripts/build-v5-prospective-artifact.mjs",
