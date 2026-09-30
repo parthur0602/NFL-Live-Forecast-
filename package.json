@@ -32,7 +32,8 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "db:generate": "drizzle-kit generate",
     "lint": "oxlint",
-    "format": "oxfmt"
+    "format": "oxfmt",
+    "football:gate:audit": "node scripts/test-v7-disagreement-gates.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",
