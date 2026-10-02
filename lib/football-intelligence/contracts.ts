@@ -239,3 +239,60 @@ export type ForecastEvidencePacket = {
   evidenceLabels: EvidenceLabel[];
   productionInfluence: 0;
 };
+
+
+export type RoleAccelerationSignal = {
+  type: 'ROLE_ACCELERATION';
+  playerId: string;
+  team: string;
+  acceleration: number | null;
+  usageDelta: number | null;
+  concentration: number | null;
+  evidenceIds: string[];
+  status: 'ACTIVE_RESEARCH';
+  productionInfluence: 0;
+};
+
+export type CountermeasureAdaptation = {
+  type: 'COUNTERMEASURE_ADAPTATION';
+  gameKey: string;
+  attackingSide: string;
+  vulnerableSide: string;
+  initialMismatch: number | null;
+  mitigation: number | null;
+  adjustedMismatch: number | null;
+  evidenceReliability: number | null;
+  evidenceIds: string[];
+  status: 'ACTIVE_RESEARCH';
+  productionInfluence: 0;
+};
+
+export type PersonnelExplosiveMatchup = {
+  type: 'PERSONNEL_EXPLOSIVE_MATCHUP';
+  gameKey: string;
+  receiverId: string;
+  defenderId: string | null;
+  score: number | null;
+  expectedCoverage: string | null;
+  evidenceIds: string[];
+  status: 'ACTIVE_RESEARCH';
+  productionInfluence: 0;
+};
+
+export type HomeEnvironmentState = {
+  type: 'HOME_ENVIRONMENT';
+  gameKey: string;
+  homeTeam: string;
+  neutralSite: boolean;
+  crowdNoise: number | null;
+  travelBurden: number | null;
+  timeZoneShift: number;
+  restDifferential: number;
+  venueFamiliarity: number | null;
+  weatherFamiliarity: number | null;
+  altitudeEffect: number | null;
+  divisionalFamiliarity: number | null;
+  evidenceIds: string[];
+  status: 'ACTIVE_RESEARCH';
+  productionInfluence: 0;
+};
