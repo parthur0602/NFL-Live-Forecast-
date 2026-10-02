@@ -1,0 +1,31 @@
+name: Football Intelligence Research Audit
+
+on:
+  push:
+    branches:
+      - chatgpt/football-intelligence-foundation
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  research-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+
+      - name: Validate football intelligence registry
+        run: npm run football:intelligence:check
+
+      - name: Run football-vs-market disagreement gate audit
+        run: npm run football:gate:audit
