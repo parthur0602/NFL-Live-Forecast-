@@ -1,0 +1,16 @@
+name: 2026 Candidate Replay
+on:
+  push:
+    branches:
+      - chatgpt/football-intelligence-foundation
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+      - run: node scripts/run-2026-candidate-replay.mjs
