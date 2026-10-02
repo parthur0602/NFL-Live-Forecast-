@@ -18,21 +18,18 @@ jobs:
     steps:
       - name: Checkout research branch
         uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '22.13.0'
-
       - name: Validate football intelligence registry
         run: npm run football:intelligence:check
-
       - name: Run football-vs-market disagreement gate audit
         run: npm run football:gate:audit
-
-      - name: Audit V7 pick crossings\n        run: node scripts/test-v7-pick-crossing.mjs\n\n      - name: Run 2026 chronological replay
+      - name: Audit V7 pick crossings
+        run: node scripts/test-v7-pick-crossing.mjs
+      - name: Run 2026 chronological replay
         run: node scripts/run-2026-chronological-replay.mjs
-
       - name: Upload 2026 replay
         uses: actions/upload-artifact@v4
         with:
