@@ -1,0 +1,6 @@
+import { loadResearchData, buildV7Result } from './v7-intelligence-core.mjs';
+function mean(a){return a.length?a.reduce((x,y)=>x+y,0)/a.length:null}
+function summary(rows,fn){let c=0,f=0,fc=0;const b=[],l=[];for(const r of rows){const p=fn(r),y=r.y,mp=r.marketProbability>=.5,pk=p>=.5;if(pk===(y===1))c++;if(pk!==mp){f++;if(pk===(y===1))fc++;}b.push((p-y)**2);l.push(-(y*Math.log(Math.max(.001,p))+(1-y)*Math.log(Math.max(.001,1-p))))}return{games:rows.length,accuracy:c/rows.length,brier:mean(b),logLoss:mean(l),pickCrossings:f,crossingsCorrect:fc}}
+function bounded(r){const p=r.final_0_25,m=r.marketProbability;if((p>=.5)===(m>=.5))return p;return m>=.5?.5001:.4999}
+const data=await loadResearchData();const {oos}=buildV7Result(data);const rows=oos.filter(r=>Number.isFinite(r.final_0_25)&&Number.isFinite(r.marketProbability));
+console.log(JSON.stringify({version:'V7-PICK-CROSSING-AUDIT-1',status:'RESEARCH_ONLY',productionInfluence:0,market:summary(rows,r=>r.marketProbability),v7:summary(rows,r=>r.final_0_25),bounded:summary(rows,bounded),bySeason:[...new Set(rows.map(r=>r.season))].map(season=>{const s=rows.filter(r=>r.season===season);return{season,market:summary(s,r=>r.marketProbability),v7:summary(s,r=>r.final_0_25),bounded:summary(s,bounded)}})},null,2));
