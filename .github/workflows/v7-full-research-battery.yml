@@ -1,0 +1,17 @@
+name: V7 Full Research Battery
+on:
+  push:
+    branches:
+      - chatgpt/football-intelligence-foundation
+permissions:
+  contents: read
+jobs:
+  battery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+      - run: node scripts/run-v7-full-research-battery.mjs
