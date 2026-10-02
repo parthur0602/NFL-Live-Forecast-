@@ -30,7 +30,7 @@ jobs:
       - name: Run football-vs-market disagreement gate audit
         run: npm run football:gate:audit
 
-      - name: Run 2026 chronological replay
+      - name: Audit V7 pick crossings\n        run: node scripts/test-v7-pick-crossing.mjs\n\n      - name: Run 2026 chronological replay
         run: node scripts/run-2026-chronological-replay.mjs
 
       - name: Upload 2026 replay
