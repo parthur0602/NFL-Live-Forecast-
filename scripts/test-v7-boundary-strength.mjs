@@ -1,0 +1,4 @@
+import {loadResearchData,buildV7Result} from './v7-intelligence-core.mjs';
+const data=await loadResearchData();const {oos}=buildV7Result(data);const rows=oos.filter(r=>Number.isFinite(r.final_0_25));
+function calc(t){let c=0,x=0,xc=0,b=0,l=0;for(const r of rows){let p=r.final_0_25,m=r.marketProbability;const crosses=(p>=.5)!=(m>=.5);if(crosses&&Math.abs(p-.5)<t)p=m>=.5?.5001:.4999;const pick=p>=.5;if(pick===(r.y===1))c++;if(pick!==(m>=.5)){x++;if(pick===(r.y===1))xc++;}b+=(p-r.y)**2;l+=-(r.y*Math.log(Math.max(.001,p))+(1-r.y)*Math.log(Math.max(.001,1-p)));}return{threshold:t,accuracy:c/rows.length,brier:b/rows.length,logLoss:l/rows.length,crossings:x,crossingsCorrect:xc}}
+console.log(JSON.stringify({version:'V7-BOUNDARY-STRENGTH-1',status:'RESEARCH_ONLY',productionInfluence:0,results:[0,.0025,.005,.0075,.01,.015,.02,.025,.03,.04,.05].map(calc)},null,2));
